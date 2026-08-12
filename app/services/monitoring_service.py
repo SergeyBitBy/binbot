@@ -1,9 +1,11 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Optional
+from sqlalchemy import select
 
 from app.db.database import AsyncSessionLocal
-from app.db.models import ScanHistory
+from app.db.models import MonitoringProfile, ScanHistory
 from app.db.repositories.merchant_repo import MerchantRepository
 from app.db.repositories.profile_repo import ProfileRepository
 from app.providers.binance.provider import BinanceP2PProvider
@@ -15,9 +17,9 @@ logger = logging.getLogger(__name__)
 class MonitoringService:
     def __init__(
         self,
-        provider: BinanceP2PProvider | None = None,
-        notification_service: NotificationService | None = None,
-        sheets_service: GoogleSheetsService | None = None,
+        provider: Optional[BinanceP2PProvider] = None,
+        notification_service: Optional[NotificationService] = None,
+        sheets_service: Optional[GoogleSheetsService] = None,
     ):
         self.provider = provider or BinanceP2PProvider()
         self.notification_service = notification_service or NotificationService()
@@ -88,7 +90,7 @@ class MonitoringService:
                         if is_new_m:
                             await self.notification_service.notify_new_merchant(
                                 merchant=merchant,
-                                contacts=merchant.contacts,
+                                contacts=new_c,
                                 profile_name=profile.name,
                                 asset=profile.asset,
                                 fiat=profile.fiat,
@@ -103,7 +105,7 @@ class MonitoringService:
 
                     # Optional Google Sheets Sync
                     if self.sheets_service.is_configured():
-                        await self.sheets_service.sync_merchant(merchant, merchant.contacts)
+                        await self.sheets_service.sync_merchant(merchant, new_c)
 
                 await session.commit()
 
