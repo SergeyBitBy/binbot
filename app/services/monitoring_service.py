@@ -65,6 +65,9 @@ class MonitoringService:
         new_merchants_count = 0
         new_contacts_count = 0
 
+        # Accumulate newly discovered merchants for batch sync at end of scan
+        merchants_to_sheet_sync = []
+
         try:
             logger.info(f"Starting scan for profile '{profile.name}' ({profile.asset}/{profile.fiat} {profile.trade_type})...")
             
@@ -110,6 +113,9 @@ class MonitoringService:
                     if new_c:
                         new_contacts_count += len(new_c)
 
+                    if is_new_m or new_c:
+                        merchants_to_sheet_sync.append((merchant, new_c))
+
                     # Extract payment method names safely from payMethods
                     pay_method_names = []
                     if getattr(item.adv, "payMethods", None):
@@ -144,11 +150,13 @@ class MonitoringService:
                                 profile_name=profile.name,
                             )
 
-                    # Optional Google Sheets Sync
-                    if self.sheets_service.is_configured():
-                        await self.sheets_service.sync_merchant(merchant, new_c)
-
                 await session.commit()
+
+            # Batch sync ONLY NEW merchants to Google Sheets once at end of scan
+            if merchants_to_sheet_sync and await self.sheets_service.is_auto_export_enabled():
+                sheets_init, _ = await self.sheets_service.initialize_with_status()
+                if sheets_init:
+                    await self.sheets_service.sync_merchants_batch(merchants_to_sheet_sync)
 
             unique_merchants = len(processed_user_nos)
 
