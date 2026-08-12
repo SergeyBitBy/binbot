@@ -17,7 +17,8 @@ class NotificationService:
     def set_bot(self, bot: Bot):
         self.bot = bot
 
-    async def is_quiet_hours(() -> bool:
+    @staticmethod
+    async def is_quiet_hours() -> bool:
         async with AsyncSessionLocal() as session:
             res_enabled = await session.execute(select(SystemSetting).where(SystemSetting.key == "quiet_hours_enabled"))
             setting_enabled = res_enabled.scalar_one_or_none()
