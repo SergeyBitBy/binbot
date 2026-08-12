@@ -74,8 +74,11 @@ class GoogleSheetsService:
 
             logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id}")
             return True
+        except ModuleNotFoundError as me:
+            logger.error("gspread library is not installed. Please run: pip install gspread google-auth")
+            return False
         except Exception as e:
-            logger.error(f"Failed to initialize Google Sheets service: {e}")
+            logger.exception(f"Failed to initialize Google Sheets service (Spreadsheet ID: {self.spreadsheet_id}): {e}")
             return False
 
     def is_configured(self) -> bool:
