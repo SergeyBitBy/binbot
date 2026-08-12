@@ -1,0 +1,19 @@
+[Unit]
+Description=Binance P2P Telegram Monitoring Bot Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/binance-p2p-monitor
+ExecStart=/opt/binance-p2p-monitor/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+EnvironmentFile=/opt/binance-p2p-monitor/.env
+
+[Install]
+WantedBy=multi-user.target

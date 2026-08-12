@@ -1,0 +1,42 @@
+# Environment & Credentials
+.env
+*.env
+*.json
+!app/*.json
+!package.json
+data/google_credentials.json
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Databases & User Data
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/backups/
+logs/
+*.log
+
+# Temp files & Diagnostics
+scripts/sample_response.json
+plan_utf8.txt
+headers.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

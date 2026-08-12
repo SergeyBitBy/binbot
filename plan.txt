@@ -1,0 +1,3238 @@
+Ты - senior Python backend developer, software architect и autonomous coding agent.
+
+Твоя задача - спроектировать и полностью реализовать production-ready Telegram-бота для автоматического мониторинга мерчантов и объявлений Binance P2P.
+
+Это должен быть не демонстрационный пример и не урезанный MVP, а полноценный, структурированный, надежный и расширяемый проект, который:
+
+- запускается локально на Windows через Python + venv;
+- может постоянно работать на Ubuntu VPS;
+- на production запускается и автоматически перезапускается через systemd;
+- НЕ использует Docker;
+- НЕ требует Docker для разработки, тестирования, запуска или production deployment.
+
+Не ограничивайся объяснениями и фрагментами кода. Необходимо создать полностью работающий repository/project.
+
+==================================================
+1. ОСНОВНАЯ ЗАДАЧА
+==================================================
+
+Telegram-бот должен автоматически получать объявления Binance P2P по заданным администратором параметрам, находить уникальных мерчантов, извлекать из объявлений и доступной публичной информации о мерчантах контактные данные, сохранять результаты в локальную базу данных и Google Sheets, отслеживать появление новых мерчантов/контактов/объявлений и уведомлять об этом в Telegram.
+
+Основной pipeline:
+
+Binance P2P
+    v
+Объявления
+    v
+Мерчанты
+    v
+Описание / remarks / auto reply / доступные данные
+    v
+Извлечение контактов
+    v
+Нормализация
+    v
+Дедупликация
+    v
+SQLite/PostgreSQL
+    v
+Google Sheets
+    v
+Telegram notifications
+
+Бот должен работать постоянно.
+
+==================================================
+2. ТЕХНОЛОГИЧЕСКИЙ СТЕК
+==================================================
+
+Использовать:
+
+- Python 3.12+
+- aiogram 3.x
+- asyncio
+- httpx.AsyncClient
+- SQLAlchemy 2.x async
+- aiosqlite
+- SQLite как основную БД для первой версии
+- предусмотреть возможность перехода на PostgreSQL
+- Alembic
+- Pydantic
+- pydantic-settings
+- Google Sheets API / gspread
+- APScheduler либо надежный asyncio-based scheduler
+- pytest
+- Ruff
+- type hints
+- logging
+- python-dotenv при необходимости
+
+НЕ использовать Docker.
+
+НЕ использовать Selenium или Playwright, если необходимые данные можно получить обычными HTTP-запросами.
+
+НЕ использовать python-binance для P2P, если прямой HTTP client дает лучший контроль над P2P endpoints.
+
+==================================================
+3. ЛОКАЛЬНАЯ РАЗРАБОТКА
+==================================================
+
+Проект должен полноценно работать на Windows без Docker.
+
+Основной workflow:
+
+python -m venv .venv
+
+Windows:
+
+.venv\Scripts\activate
+
+Установка:
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+или, если будет использоваться pyproject.toml:
+
+pip install -e .
+
+Запуск:
+
+python run.py
+
+или:
+
+python -m app
+
+Выбери наиболее удобный и понятный вариант.
+
+Все следующие операции должны работать БЕЗ Docker:
+
+- запуск приложения;
+- тесты;
+- Ruff;
+- Alembic migrations;
+- Binance diagnostic scripts;
+- database initialization;
+- Google Sheets integration;
+- Telegram bot.
+
+==================================================
+4. PRODUCTION DEPLOYMENT
+==================================================
+
+Production environment:
+
+Ubuntu 22.04 / Ubuntu 24.04
+
+Использовать:
+
+Python 3.12+
+venv
+systemd
+
+Пример структуры:
+
+/opt/binance-p2p-monitor/
+    .venv/
+    app/
+    data/
+    logs/
+    scripts/
+    migrations/
+    .env
+    run.py
+    requirements.txt
+
+Создать готовый systemd service:
+
+deploy/binance-p2p-monitor.service
+
+Он должен:
+
+- запускать приложение из venv;
+- запускаться автоматически после reboot;
+- автоматически перезапускать приложение при падении;
+- использовать WorkingDirectory;
+- корректно работать с .env;
+- корректно обрабатывать SIGTERM.
+
+Например использовать:
+
+Restart=on-failure
+RestartSec=5
+
+или более подходящую конфигурацию.
+
+Также написать инструкцию:
+
+sudo systemctl daemon-reload
+sudo systemctl enable binance-p2p-monitor
+sudo systemctl start binance-p2p-monitor
+sudo systemctl status binance-p2p-monitor
+
+Логи должны быть доступны как через application logs, так и при необходимости через:
+
+journalctl -u binance-p2p-monitor
+
+==================================================
+5. АРХИТЕКТУРА
+==================================================
+
+Не смешивать Telegram handlers, Binance API, parsing, database и Google Sheets.
+
+Использовать чистую модульную архитектуру примерно такого вида:
+
+project/
+    run.py
+
+    app/
+        __init__.py
+        main.py
+
+        config/
+            settings.py
+            logging.py
+
+        bot/
+            handlers/
+            keyboards/
+            middlewares/
+            filters/
+            states/
+            callbacks/
+
+        admin/
+            handlers/
+            keyboards/
+            states/
+
+        providers/
+            base.py
+
+            binance/
+                provider.py
+                agent_client.py
+                web_client.py
+                models.py
+                mapper.py
+                exceptions.py
+
+        services/
+            monitoring.py
+            merchant_service.py
+            contact_extractor.py
+            notification_service.py
+            sheets_service.py
+            settings_service.py
+            export_service.py
+            health_service.py
+
+        repositories/
+            merchants.py
+            ads.py
+            contacts.py
+            settings.py
+            monitoring_profiles.py
+            scans.py
+
+        database/
+            models.py
+            session.py
+            base.py
+
+        scheduler/
+            scheduler.py
+
+        utils/
+            retry.py
+            normalization.py
+            rate_limit.py
+            pagination.py
+            datetime.py
+
+    migrations/
+
+    scripts/
+        test_binance.py
+        backup.py
+        restore.py
+
+    deploy/
+        binance-p2p-monitor.service
+
+    tests/
+        fixtures/
+
+    data/
+    logs/
+
+    .env.example
+    .gitignore
+    requirements.txt
+    README.md
+    INSTALLATION.md
+
+При необходимости улучшить структуру.
+
+Главное требование:
+
+Telegram handlers НЕ должны напрямую делать запросы к Binance.
+
+Telegram Layer
+    v
+Service Layer
+    v
+Provider Layer
+    v
+Binance
+
+Аналогично database access должен проходить через repository/service layer там, где это имеет смысл.
+
+==================================================
+6. PROVIDER ABSTRACTION
+==================================================
+
+Архитектура должна позволять в будущем добавить:
+
+BybitP2PProvider
+OKXP2PProvider
+и другие платформы.
+
+Создать BaseP2PProvider.
+
+Например:
+
+class BaseP2PProvider:
+    async def get_ads(...)
+    async def get_merchant(...)
+    async def get_merchant_ads(...)
+
+Конкретная реализация:
+
+BinanceP2PProvider(BaseP2PProvider)
+
+Telegram и MonitoringService не должны зависеть от структуры Binance JSON.
+
+==================================================
+7. BINANCE P2P
+==================================================
+
+ПЕРЕД реализацией исследуй актуальное состояние Binance P2P API на момент разработки.
+
+Не доверяй слепо endpoint'ам из этого prompt.
+
+Известные потенциальные варианты:
+
+официальный/public Agent API:
+
+GET
+https://www.binance.com/bapi/c2c/v1/public/c2c/agent/ad-list
+
+и web endpoint:
+
+POST
+https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search
+
+Проверь:
+
+- работают ли они сейчас;
+- HTTP method;
+- headers;
+- body/query parameters;
+- pagination;
+- limit;
+- response schema;
+- merchant identifier;
+- nickname;
+- merchant verification;
+- merchant type;
+- remarks;
+- autoReplyMsg;
+- payment methods;
+- order statistics;
+- completion rate;
+- price;
+- limits;
+- available amount;
+- advertisement ID.
+
+Не придумывай поля, которых Binance реально не возвращает.
+
+Если официальный endpoint возвращает все необходимые данные - использовать его как primary.
+
+Если он не возвращает remarks/необходимые merchant data, исследовать web API.
+
+Можно предусмотреть:
+
+BinanceP2PProvider
+    |
+    +-- BinanceAgentClient
+    |
+    +-- BinanceWebClient
+
+Primary + fallback.
+
+Но fallback должен быть контролируемым.
+
+==================================================
+8. BINANCE DIAGNOSTIC SCRIPT
+==================================================
+
+ПЕРЕД написанием основной интеграции создать:
+
+scripts/test_binance.py
+
+Он должен сделать реальный безопасный запрос, например:
+
+USDT / UAH
+
+и вывести sanitized информацию:
+
+- ad ID;
+- merchant ID;
+- nickname;
+- price;
+- direction;
+- merchant type;
+- verified status;
+- pro merchant status;
+- remarks;
+- autoReplyMsg;
+- payment methods;
+- order count;
+- completion rate.
+
+Также проверить pagination.
+
+Если remarks доступны, прогнать их через ContactExtractor.
+
+На основании реального ответа зафиксировать фактическую schema Binance.
+
+Только после этого строить production mapper.
+
+==================================================
+9. BINANCE DATA MAPPING
+==================================================
+
+Не распространять raw Binance JSON по всему приложению.
+
+Создать внутренние модели.
+
+Например:
+
+P2PAdvertisement
+P2PMerchant
+PaymentMethod
+
+Binance mapper:
+
+raw Binance JSON
+    v
+BinanceMapper
+    v
+internal models
+
+Вся остальная система работает только с internal models.
+
+==================================================
+10. ДАННЫЕ ОБЪЯВЛЕНИЯ
+==================================================
+
+По возможности получать:
+
+- provider
+- advNo / advertisement ID
+- merchant external ID / userNo
+- nickname
+- asset
+- fiat
+- BUY / SELL
+- price
+- min amount
+- max amount
+- available amount
+- payment methods
+- remarks
+- autoReplyMsg
+- merchant type
+- verified status
+- pro merchant
+- order count
+- 30-day/month order count
+- completion rate
+- registration time
+- first seen
+- last seen
+
+Если Binance перестал возвращать поле, приложение не должно падать целиком.
+
+==================================================
+11. DECIMAL
+==================================================
+
+Для денег и цен НЕ использовать float.
+
+Использовать Decimal.
+
+==================================================
+12. PAGINATION
+==================================================
+
+Не ограничиваться первыми 20 advertisements.
+
+Поддержать:
+
+- max pages;
+- max advertisements;
+- scan all available, если это возможно.
+
+Защита от бесконечной pagination.
+
+Остановить scan если:
+
+- API вернул пустой список;
+- страница повторяется;
+- достигнут max_pages;
+- достигнут max_ads;
+- API явно сообщил об окончании данных.
+
+==================================================
+13. RATE LIMITING
+==================================================
+
+Не создавать агрессивный scraper.
+
+Реализовать:
+
+- timeout;
+- retries;
+- exponential backoff;
+- jitter;
+- configurable request delay;
+- concurrency limit;
+- обработку 429;
+- обработку 403;
+- обработку 5xx.
+
+При 429 увеличить задержку.
+
+Не обходить CAPTCHA, Cloudflare и другие security mechanisms.
+
+Если Binance блокирует источник, уведомить администратора.
+
+==================================================
+14. CONTACT EXTRACTOR
+==================================================
+
+Создать отдельный расширяемый:
+
+ContactExtractor
+
+Анализировать:
+
+- remarks;
+- autoReplyMsg;
+- другие публично доступные текстовые поля.
+
+Извлекать:
+
+Telegram:
+@example
+t.me/example
+https://t.me/example
+telegram.me/example
+
+Phone:
++380...
++48...
++7...
+и международные номера.
+
+WhatsApp:
+wa.me/...
+WhatsApp +number
+
+Other URLs.
+
+Учитывать:
+
+TG
+tg
+Telegram
+telegram
+телеграм
+тг
+телега
+WhatsApp
+Whatsapp
+WA
+ватсап
+
+Нормализовать Telegram:
+
+https://t.me/example
+t.me/example
+@example
+
+в:
+
+@example
+
+Телефоны также нормализовать.
+
+==================================================
+15. CONTACT VALIDATION
+==================================================
+
+Не считать произвольное слово после "Telegram" username.
+
+Telegram username валидировать.
+
+Учитывать допустимую длину и символы.
+
+Для каждого контакта хранить:
+
+type
+raw_value
+normalized_value
+source
+first_seen
+last_seen
+
+==================================================
+16. ДЕДУПЛИКАЦИЯ MERCHANT
+==================================================
+
+Главная сущность - merchant.
+
+Использовать стабильный Binance merchant identifier/userNo, если доступен.
+
+НЕ использовать nickname как основной unique key.
+
+Nickname может измениться.
+
+Если merchant уже существует:
+
+- обновить last_seen;
+- обновить nickname;
+- обновить statistics;
+- добавить новые contacts;
+- добавить новые advertisements.
+
+Не создавать duplicate merchant.
+
+==================================================
+17. DATABASE
+==================================================
+
+Основная версия:
+
+SQLite + SQLAlchemy async.
+
+DATABASE_URL:
+
+sqlite+aiosqlite:///./data/bot.db
+
+Архитектура должна позволять заменить URL на PostgreSQL в будущем.
+
+Использовать Alembic migrations.
+
+==================================================
+18. DATABASE MODELS
+==================================================
+
+Минимально:
+
+Merchant
+
+id
+provider
+external_id
+nickname
+merchant_type
+verified
+pro_merchant
+order_count
+month_order_count
+completion_rate
+registration_time
+first_seen
+last_seen
+created_at
+updated_at
+
+
+Contact
+
+id
+merchant_id
+type
+raw_value
+normalized_value
+source
+first_seen
+last_seen
+created_at
+updated_at
+
+
+Advertisement
+
+id
+provider
+external_ad_id
+merchant_id
+asset
+fiat
+trade_type
+price
+min_amount
+max_amount
+available_amount
+remarks
+auto_reply
+payment_methods
+first_seen
+last_seen
+created_at
+updated_at
+
+
+MonitoringProfile
+
+id
+name
+enabled
+provider
+assets
+fiats
+trade_types
+merchant_filters
+interval_seconds
+max_pages
+max_ads
+extract_contacts
+initial_sync_completed
+created_at
+updated_at
+
+
+AllowedUser
+
+id
+telegram_user_id
+telegram_username
+role
+enabled
+
+
+AllowedChat
+
+id
+chat_id
+title
+enabled
+commands_allowed
+notifications_enabled
+
+
+ScanRun
+
+id
+profile_id
+started_at
+finished_at
+status
+ads_found
+merchants_found
+new_merchants
+new_contacts
+error
+
+
+AppSetting
+
+id
+key
+value
+
+
+NotificationState
+
+для предотвращения duplicate notifications.
+
+
+При необходимости нормализовать schema лучше.
+
+==================================================
+19. HISTORY
+==================================================
+
+Хранить:
+
+- first_seen;
+- last_seen;
+- advertisements;
+- contacts;
+- currencies;
+- assets;
+- directions.
+
+Если контакт изменился, не уничтожать историю.
+
+Например:
+
+было:
+@oldmerchant
+
+появилось:
+@newmerchant
+
+Добавить новый contact.
+
+Старый оставить в истории с последним last_seen.
+
+==================================================
+20. MONITORING PROFILES
+==================================================
+
+Это важная функция.
+
+Не делать только один глобальный monitoring configuration.
+
+Администратор может создать несколько Monitoring Profiles.
+
+Пример:
+
+Profile:
+UAH Verified
+
+Assets:
+USDT
+
+Fiats:
+UAH
+
+Directions:
+BUY + SELL
+
+Merchant:
+Verified only
+
+Interval:
+5 minutes
+
+
+Другой:
+
+PLN ALL
+
+Assets:
+USDT
+
+Fiats:
+PLN
+
+Direction:
+SELL
+
+Merchant:
+All
+
+Interval:
+15 minutes
+
+==================================================
+21. УПРАВЛЕНИЕ PROFILE
+==================================================
+
+Через Telegram:
+
+- создать;
+- изменить;
+- включить;
+- выключить;
+- удалить;
+- посмотреть;
+- запустить вручную;
+- клонировать profile.
+
+==================================================
+22. FIAT CURRENCIES
+==================================================
+
+Поддерживать множественный выбор.
+
+Например:
+
+UAH
+EUR
+USD
+PLN
+GBP
+TRY
+KZT
+GEL
+AMD
+AZN
+RUB
+
+и другие Binance P2P currencies.
+
+Не ограничивать систему hardcoded списком, если Binance позволяет получить currencies динамически.
+
+Если динамический список получить нельзя - создать централизованный configurable registry.
+
+==================================================
+23. ASSETS
+==================================================
+
+Поддерживать:
+
+USDT
+USDC
+BTC
+ETH
+FDUSD
+
+и другие доступные P2P assets.
+
+Также множественный выбор.
+
+==================================================
+24. TRADE DIRECTION
+==================================================
+
+Поддерживать:
+
+BUY
+SELL
+BUY + SELL
+
+Очень важно:
+
+четко определить семантику Binance tradeType.
+
+В Telegram UI подписать так, чтобы администратор понимал, кто покупает/продает crypto.
+
+==================================================
+25. MERCHANT FILTERS
+==================================================
+
+Минимум:
+
+All merchants
+Verified merchants only
+
+Если Binance возвращает данные:
+
+Pro Merchant only
+Block Merchant
+Regular User
+Merchant type
+
+Также предусмотреть:
+
+minimum completion rate
+minimum order count
+minimum 30d orders
+payment method
+has Telegram
+has phone
+has any contact
+
+Filters применять к INTERNAL merchant model, а не raw Binance JSON.
+
+==================================================
+26. TELEGRAM ADMIN PANEL
+==================================================
+
+Вся admin panel работает через Telegram.
+
+Использовать InlineKeyboard.
+
+Главное меню примерно:
+
+?? Статус
+?? Мониторинг
+?? Мерчанты
+?? Google Sheets
+?? Уведомления
+?? Настройки
+?? Администраторы
+?? Разрешенные чаты
+?? Логи
+?? Запустить сканирование
+
+Сделать интерфейс понятным и аккуратным.
+
+==================================================
+27. INITIAL ADMIN
+==================================================
+
+По умолчанию административный username:
+
+@sergebybitp2p
+
+В ENV:
+
+INITIAL_ADMIN_USERNAME=sergebybitp2p
+
+Однако Telegram username НЕ должен быть единственным постоянным security identifier.
+
+При первом взаимодействии разрешенного username с ботом:
+
+получить telegram user_id
+
+и сохранить его.
+
+После привязки авторизацию выполнять преимущественно по numeric user_id.
+
+==================================================
+28. ADMIN ROLES
+==================================================
+
+Роли:
+
+superadmin
+admin
+viewer
+
+Superadmin:
+
+- полный доступ;
+- управление admins;
+- управление allowed chats.
+
+Admin:
+
+- profiles;
+- settings;
+- scans;
+- Sheets.
+
+Viewer:
+
+- status;
+- merchants;
+- результаты.
+
+Не позволять удалить/отключить последнего superadmin без специальной процедуры.
+
+==================================================
+29. INITIAL ALLOWED CHAT
+==================================================
+
+По умолчанию:
+
+chat_id = 930460307
+
+ENV:
+
+INITIAL_ALLOWED_CHAT_ID=930460307
+
+==================================================
+30. ALLOWED CHATS
+==================================================
+
+Для каждого чата:
+
+chat_id
+title
+enabled
+commands_allowed
+notifications_enabled
+
+Admin panel:
+
+- посмотреть;
+- добавить;
+- удалить;
+- enable/disable;
+- разрешить commands;
+- разрешить notifications.
+
+Один chat может использоваться для управления.
+
+Другой - только для notifications.
+
+==================================================
+31. SECURITY
+==================================================
+
+Каждый admin handler и callback должен делать server-side authorization.
+
+Нельзя считать пользователя авторизованным только потому, что он увидел кнопку.
+
+Не логировать:
+
+BOT_TOKEN
+Google credentials
+API secrets.
+
+.env обязательно добавить в .gitignore.
+
+Создать .env.example.
+
+==================================================
+32. GOOGLE SHEETS
+==================================================
+
+Интеграция должна быть optional.
+
+Бот должен работать даже без Google Sheets.
+
+Администратор может через Telegram указать URL Google Spreadsheet.
+
+Flow:
+
+Google Sheets
+> Изменить таблицу
+> отправить URL
+> проверить URL
+> извлечь Spreadsheet ID
+> проверить доступ.
+
+Если service account не имеет доступа:
+
+показать email service account и инструкцию предоставить Editor access.
+
+==================================================
+33. GOOGLE CREDENTIALS
+==================================================
+
+Credentials НЕ хранить в DB.
+
+Использовать:
+
+GOOGLE_CREDENTIALS_FILE=...
+
+Например:
+
+GOOGLE_CREDENTIALS_FILE=./secrets/google-service-account.json
+
+Добавить secrets/ в .gitignore.
+
+==================================================
+34. GOOGLE SHEETS STRUCTURE
+==================================================
+
+Автоматически создать собственные worksheets.
+
+Merchants:
+
+Provider
+Merchant ID
+Nickname
+Merchant Type
+Verified
+Pro Merchant
+Telegram
+Phone
+WhatsApp
+Other Contacts
+First Seen
+Last Seen
+Fiat
+Asset
+Directions
+Order Count
+30d Orders
+Completion Rate
+Ad Count
+Last Price
+Last Ad ID
+Last Remarks
+
+
+Ads:
+
+Ad ID
+Merchant ID
+Nickname
+Asset
+Fiat
+Direction
+Price
+Min
+Max
+Available
+Payment Methods
+Remarks
+First Seen
+Last Seen
+
+
+Contacts:
+
+Merchant ID
+Nickname
+Type
+Contact
+Source
+First Seen
+Last Seen
+
+
+Scan Log:
+
+Date
+Profile
+Duration
+Ads
+Merchants
+New Merchants
+New Contacts
+Status
+
+==================================================
+35. GOOGLE SHEETS SAFETY
+==================================================
+
+Google Sheets НЕ является source of truth.
+
+Source of truth:
+
+DATABASE.
+
+Flow:
+
+Binance
+> DB commit
+> Google Sheets synchronization
+
+Если Google Sheets API недоступен:
+
+данные остаются в DB.
+
+Пометить записи как requiring sync.
+
+Повторить synchronization позже.
+
+==================================================
+36. GOOGLE SHEETS BATCHING
+==================================================
+
+Не выполнять отдельный API request для каждой cell/row.
+
+Использовать batch updates.
+
+Минимизировать Google API calls.
+
+==================================================
+37. SCHEDULER
+==================================================
+
+Каждый MonitoringProfile имеет interval.
+
+Предустановки:
+
+1 minute
+5 minutes
+10 minutes
+15 minutes
+30 minutes
+1 hour
+Custom
+
+Минимальный interval должен быть разумным.
+
+Default можно сделать 5 minutes.
+
+==================================================
+38. PROFILE LOCK
+==================================================
+
+Не запускать один MonitoringProfile параллельно.
+
+Если scheduled scan уже работает, а наступил следующий:
+
+skip.
+
+Записать warning.
+
+Если пользователь нажал Scan now:
+
+"Этот профиль уже сканируется."
+
+==================================================
+39. NOTIFICATIONS
+==================================================
+
+Настраиваемые события:
+
+New merchant
+New Telegram contact
+New phone
+New contact
+New advertisement
+Merchant returned
+Scan error
+Binance unavailable
+Binance recovered
+Google Sheets error
+Google Sheets recovered
+Scan summary
+
+Каждый тип можно enable/disable.
+
+==================================================
+40. NEW MERCHANT NOTIFICATION
+==================================================
+
+Пример:
+
+?? Новый Binance P2P merchant
+
+Nickname: CryptoUA
+Merchant ID: XXXXX
+
+Pair: USDT/UAH
+Direction: SELL
+Price: 43.25 UAH
+
+Telegram: @cryptoua
+Phone: +380XXXXXXXXX
+
+Orders: 2450
+Completion: 99.8%
+Verified: Yes
+
+Advertisement:
+<Binance link>
+
+First seen:
+12.08.2026 15:30
+
+Не показывать строки, для которых нет данных.
+
+==================================================
+41. ADVERTISEMENT LINK
+==================================================
+
+Если advNo позволяет сформировать Binance advertisement URL:
+
+создавать clickable link.
+
+Но сначала проверить актуальный формат ссылки.
+
+Не придумывать URL.
+
+==================================================
+42. NOTIFICATION DEDUPLICATION
+==================================================
+
+Новый merchant - только тот merchant, которого раньше не было в DB.
+
+Existing merchant не должен создавать New Merchant notification каждый scan.
+
+Если существующий merchant впервые добавил Telegram:
+
+отправить New Telegram notification.
+
+Notification state должна сохраняться после restart.
+
+==================================================
+43. INITIAL BASELINE
+==================================================
+
+Очень важно.
+
+Первый scan MonitoringProfile может найти сотни merchants.
+
+По умолчанию НЕ отправлять сотни New Merchant notifications.
+
+Первый scan:
+
+- получает данные;
+- заполняет DB;
+- синхронизирует Sheets;
+- создает baseline;
+- НЕ отправляет individual New Merchant notifications.
+
+После завершения:
+
+? Initial scan completed
+
+Profile: UAH Verified
+Merchants: 327
+Contacts: 214
+Telegram contacts: 143
+
+Теперь monitoring активен.
+
+Добавить настройку, позволяющую при желании уведомлять даже при initial import.
+
+Default:
+
+NO notifications during baseline.
+
+==================================================
+44. NOTIFICATION BATCHING
+==================================================
+
+Если за scan найдено мало новых merchants:
+
+отправлять individual messages.
+
+Если больше configurable threshold, например 10:
+
+отправить summary:
+
+?? Найдено 47 новых мерчантов
+
+UAH: 32
+PLN: 10
+EUR: 5
+
+Telegram contacts: 21
+Phone contacts: 14
+
+Кнопки:
+
+Показать список
+Открыть Google Sheets
+
+==================================================
+45. QUIET HOURS
+==================================================
+
+Optional quiet hours.
+
+Default timezone:
+
+Europe/Kyiv
+
+Например:
+
+23:00 - 08:00
+
+Во время quiet hours:
+
+- parsing продолжается;
+- DB обновляется;
+- Sheets обновляется;
+- обычные notifications накапливаются.
+
+После окончания quiet hours:
+
+отправить summary.
+
+Critical errors можно разрешить отправлять сразу.
+
+==================================================
+46. /STATUS
+==================================================
+
+Показывать:
+
+Bot uptime
+Monitoring status
+Last scan
+Next scan
+Active profiles
+Binance status
+Google Sheets status
+Merchants total
+Merchants today
+New merchants 24h
+Contacts total
+Telegram contacts
+Last error
+
+==================================================
+47. DASHBOARD
+==================================================
+
+Главное меню может показывать:
+
+?? Monitoring active
+
+Profiles: 3
+Merchants: 1,284
+Contacts: 734
+New 24h: 18
+
+Last scan: 2 min ago
+Next scan: 3 min
+
+Binance: ??
+Google Sheets: ??
+Database: ??
+
+==================================================
+48. MANUAL SCAN
+==================================================
+
+Кнопка:
+
+?? Scan now
+
+Выбрать profile.
+
+После запуска:
+
+? Scan started...
+
+После:
+
+? Scan completed
+
+Ads scanned: 420
+Unique merchants: 163
+New merchants: 7
+New contacts: 3
+Duration: 8.4 sec
+
+==================================================
+49. MERCHANT SEARCH
+==================================================
+
+Admin panel:
+
+?? Merchants
+
+Возможности:
+
+Search by nickname
+Search by Merchant ID
+Search by Telegram
+Search by phone
+Recent merchants
+New today
+New 24h
+With Telegram
+With phone
+Without contacts
+Verified only
+
+==================================================
+50. MERCHANT CARD
+==================================================
+
+Пример:
+
+Merchant: CryptoUA
+
+Binance ID:
+XXXXX
+
+Status:
+Verified Merchant
+
+First seen:
+...
+
+Last seen:
+...
+
+Pairs:
+USDT/UAH
+USDT/EUR
+
+Directions:
+BUY / SELL
+
+Telegram:
+@merchant1
+@merchant2
+
+Phone:
+...
+
+Orders:
+...
+
+Completion:
+...
+
+Advertisements:
+5
+
+Кнопки:
+
+?? Ads
+?? Contacts
+?? History
+?? Binance
+?? Refresh
+
+==================================================
+51. MULTIPLE CONTACTS
+==================================================
+
+Merchant может иметь несколько Telegram/phone.
+
+Не ограничивать DB полями:
+
+merchant.telegram
+merchant.phone
+
+Использовать отдельную Contact table.
+
+В Google Sheets можно отображать:
+
+@one, @two, @three
+
+==================================================
+52. MERCHANT RETURNED
+==================================================
+
+Если merchant уже был в DB, исчез на длительный срок и появился снова:
+
+это НЕ New Merchant.
+
+Можно генерировать:
+
+Merchant returned
+
+Настройка inactivity threshold.
+
+Например:
+
+30 days.
+
+==================================================
+53. NEW ADVERTISEMENT
+==================================================
+
+Новый merchant и новое advertisement - разные события.
+
+Существующий merchant может создать новый ad.
+
+Система должна это отслеживать.
+
+==================================================
+54. SCAN HISTORY
+==================================================
+
+Хранить каждый ScanRun.
+
+Telegram:
+
+Recent scans
+
+12.08 15:30 | UAH | ? | 8.3 sec
+12.08 15:25 | UAH | ? | 7.9 sec
+12.08 15:20 | UAH | ? | Binance 429
+
+При открытии показать details.
+
+==================================================
+55. HEALTH MONITORING
+==================================================
+
+Отдельно отслеживать:
+
+Telegram
+Binance
+Database
+Google Sheets
+
+Если Binance несколько раз подряд падает:
+
+не отправлять одинаковое уведомление каждую минуту.
+
+Например:
+
+первый failure:
+?? Binance P2P API unavailable.
+
+После восстановления:
+
+? Binance P2P API recovered.
+Downtime: 17 minutes.
+
+==================================================
+56. LOGGING
+==================================================
+
+Использовать Python logging.
+
+Логи:
+
+logs/app.log
+logs/error.log
+
+Использовать RotatingFileHandler или TimedRotatingFileHandler.
+
+Не допускать бесконечного роста файлов.
+
+Не логировать secrets.
+
+==================================================
+57. TELEGRAM LOG VIEWER
+==================================================
+
+Admin panel:
+
+?? Logs
+
+Показывать:
+
+Recent errors
+Recent warnings
+
+Не отправлять пользователю огромный application.log.
+
+==================================================
+58. GRACEFUL SHUTDOWN
+==================================================
+
+Корректно обрабатывать:
+
+SIGINT
+SIGTERM
+
+При shutdown:
+
+- остановить scheduler;
+- не начинать новые scans;
+- завершить/корректно отменить tasks;
+- закрыть httpx AsyncClient;
+- закрыть Telegram session;
+- закрыть DB engine.
+
+Это важно для systemd restart.
+
+==================================================
+59. SYSTEMD
+==================================================
+
+Создать production service:
+
+deploy/binance-p2p-monitor.service
+
+Он должен использовать venv.
+
+Пример логики:
+
+[Unit]
+Description=Binance P2P Telegram Monitor
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/binance-p2p-monitor
+ExecStart=/opt/binance-p2p-monitor/.venv/bin/python run.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+Это пример.
+
+Улучши конфигурацию при необходимости.
+
+==================================================
+60. .ENV
+==================================================
+
+Создать .env.example.
+
+Пример:
+
+BOT_TOKEN=
+
+INITIAL_ADMIN_USERNAME=sergebybitp2p
+INITIAL_ALLOWED_CHAT_ID=930460307
+
+DATABASE_URL=sqlite+aiosqlite:///./data/bot.db
+
+TIMEZONE=Europe/Kyiv
+
+GOOGLE_CREDENTIALS_FILE=./secrets/google-service-account.json
+
+LOG_LEVEL=INFO
+
+BINANCE_TIMEOUT=15
+BINANCE_MAX_RETRIES=3
+BINANCE_REQUEST_DELAY=0.3
+
+DEFAULT_SCAN_INTERVAL=300
+
+Никаких реальных secrets в repository.
+
+==================================================
+61. SETTINGS STORAGE
+==================================================
+
+Разделить:
+
+Infrastructure/secrets:
+.env
+
+User configurable settings:
+database
+
+Например:
+
+BOT_TOKEN -> ENV
+Google credentials path -> ENV
+
+Но:
+
+scan interval -> DB
+currencies -> DB
+directions -> DB
+filters -> DB
+Google Spreadsheet URL -> DB
+notification settings -> DB
+
+==================================================
+62. FSM
+==================================================
+
+Использовать aiogram FSM для многошаговых действий.
+
+Например:
+
+Create Monitoring Profile
+
+Name
+v
+Provider
+v
+Assets
+v
+Fiats
+v
+Directions
+v
+Merchant filters
+v
+Interval
+v
+Max pages
+v
+Notifications
+v
+Review
+v
+Save
+
+На каждом этапе:
+
+?? Назад
+? Отмена
+
+==================================================
+63. MULTISELECT UI
+==================================================
+
+Для multiple selection:
+
+?? UAH
+?? EUR
+? PLN
+? GBP
+
+Кнопка:
+
+? Готово
+
+Аналогично assets, directions и filters.
+
+==================================================
+64. CALLBACK DATA
+==================================================
+
+Использовать aiogram CallbackData classes.
+
+Не создавать хаотичные callback strings.
+
+Учитывать Telegram callback_data limit.
+
+==================================================
+65. PAGINATION UI
+==================================================
+
+Создать reusable Telegram pagination.
+
+Использовать для:
+
+merchants
+profiles
+scans
+currencies
+contacts
+ads
+
+==================================================
+66. TELEGRAM LIMITS
+==================================================
+
+Учитывать:
+
+message length
+callback_data size
+Telegram API rate limits
+
+Notification sending выполнять через controlled queue.
+
+Не запускать сотни send_message одновременно.
+
+==================================================
+67. CONCURRENCY
+==================================================
+
+Использовать asyncio корректно.
+
+Один reusable:
+
+httpx.AsyncClient
+
+Не создавать HTTP client на каждый advertisement.
+
+Если используется synchronous gspread:
+
+выполнять blocking calls через:
+
+asyncio.to_thread()
+
+либо выбрать надежный async-compatible вариант.
+
+==================================================
+68. DATABASE TRANSACTIONS
+==================================================
+
+Критические изменения сохранять транзакционно.
+
+Если Google Sheets упал:
+
+НЕ откатывать успешно сохраненные Binance data.
+
+Database является source of truth.
+
+==================================================
+69. DATETIME
+==================================================
+
+В DB хранить timestamps преимущественно в UTC.
+
+В Telegram отображать:
+
+Europe/Kyiv
+
+или configured timezone.
+
+==================================================
+70. GOOGLE SHEETS RETRY
+==================================================
+
+Если:
+
+quota exceeded
+timeout
+permission denied
+temporary API error
+
+monitoring Binance должен продолжить работу.
+
+Создать pending synchronization mechanism.
+
+После restart pending sync не должна потеряться.
+
+==================================================
+71. TESTING
+==================================================
+
+Написать unit tests минимум для:
+
+ContactExtractor
+Telegram normalization
+Phone normalization
+Merchant deduplication
+Merchant filters
+Binance mapper
+Pagination protection
+Notification deduplication
+Initial baseline
+MonitoringProfile validation
+
+==================================================
+72. BINANCE TEST FIXTURES
+==================================================
+
+Создать sanitized Binance JSON fixtures.
+
+Unit tests НЕ должны зависеть от live Binance.
+
+Live integration test сделать отдельным optional test/script.
+
+==================================================
+73. CONTACT EXTRACTOR TESTS
+==================================================
+
+Проверить:
+
+TG @example123
+Telegram: @example123
+https://t.me/example123
+t.me/example123
+telegram.me/example123
+WhatsApp +380671234567
+wa.me/380671234567
+
+Также ложные совпадения.
+
+==================================================
+74. BINANCE SCHEMA CHANGE
+==================================================
+
+Если response Binance существенно изменился:
+
+не падать с KeyError.
+
+Логировать warning.
+
+Если critical fields отсутствуют:
+
+уведомить admin:
+
+?? Binance response schema may have changed.
+
+==================================================
+75. CACHE
+==================================================
+
+Не получать одни и те же merchant details многократно в одном scan.
+
+Если 20 advertisements принадлежат одному merchant:
+
+merchant profile/details получить максимум один раз, если дополнительный request вообще требуется.
+
+Использовать merchant external ID как cache key.
+
+==================================================
+76. METRICS
+==================================================
+
+Внутренне считать:
+
+total_requests
+failed_requests
+429_count
+403_count
+scan_duration
+ads_processed
+unique_merchants
+new_merchants
+new_contacts
+sheets_updates
+
+Отображать часть metrics в status/admin panel.
+
+==================================================
+77. CSV EXPORT
+==================================================
+
+Через Telegram:
+
+Export CSV
+
+Варианты:
+
+All merchants
+New today
+New 24h
+With Telegram
+With Phone
+Selected MonitoringProfile
+
+Создать CSV и отправить authorized administrator.
+
+==================================================
+78. BACKUP
+==================================================
+
+Docker не используется.
+
+Создать:
+
+scripts/backup.py
+
+для безопасного SQLite backup.
+
+Использовать корректный SQLite backup mechanism/API.
+
+Не делать небезопасное копирование DB во время активной транзакции.
+
+Backup folder:
+
+backups/
+
+Добавить retention.
+
+Например оставить последние 30 backups.
+
+==================================================
+79. RESTORE
+==================================================
+
+Создать:
+
+scripts/restore.py
+
+Но restore должен требовать явного подтверждения.
+
+В README подробно описать restore.
+
+==================================================
+80. OPTIONAL AUTOMATIC BACKUP
+==================================================
+
+Предусмотреть automatic DB backup.
+
+Например один раз в сутки.
+
+Настраиваемое время.
+
+Default:
+
+03:00 Europe/Kyiv
+
+Можно реализовать через scheduler приложения.
+
+==================================================
+81. /START
+==================================================
+
+Unauthorized user:
+
+"У вас нет доступа к этому боту."
+
+Не раскрывать admin information.
+
+Authorized user:
+
+показать dashboard/main menu.
+
+==================================================
+82. COMMANDS
+==================================================
+
+Минимум:
+
+/start
+/help
+/status
+/cancel
+
+При необходимости:
+
+/scan
+/export
+
+Но основной UX должен быть через buttons.
+
+==================================================
+83. DANGEROUS ACTION CONFIRMATION
+==================================================
+
+Подтверждение для:
+
+Delete profile
+Remove admin
+Clear database
+Reset baseline
+Disable monitoring
+Restore backup
+
+Confirm / Cancel.
+
+==================================================
+84. GOOGLE SHEETS SAFETY
+==================================================
+
+Никогда автоматически не очищать чужую таблицу целиком.
+
+Работать только с worksheets приложения.
+
+Если worksheet существует:
+
+проверить headers.
+
+Не уничтожать неизвестные пользовательские sheets.
+
+==================================================
+85. RESTART PERSISTENCE
+==================================================
+
+После restart:
+
+- settings сохраняются;
+- admins сохраняются;
+- allowed chats сохраняются;
+- profiles сохраняются;
+- scheduler jobs восстанавливаются;
+- baseline сохраняется;
+- merchants не становятся "new";
+- notification state сохраняется;
+- Sheets pending sync сохраняется.
+
+==================================================
+86. PAUSE MONITORING
+==================================================
+
+Глобальная функция:
+
+? Pause monitoring
+
+Scheduler scans останавливаются.
+
+Telegram bot продолжает работать.
+
+Кнопка:
+
+?? Resume monitoring
+
+возобновляет jobs.
+
+==================================================
+87. CONTACT PARSING TOGGLE
+==================================================
+
+MonitoringProfile:
+
+Extract contacts:
+ON / OFF
+
+Можно использовать бот просто для merchant monitoring.
+
+==================================================
+88. RAW DATA
+==================================================
+
+Для debugging можно опционально сохранять sanitized raw response.
+
+Но не раздувать DB бесконечно.
+
+Настроить retention.
+
+По умолчанию production raw storage можно отключить.
+
+==================================================
+89. DATA RETENTION
+==================================================
+
+Настройки retention:
+
+application logs
+scan history
+raw responses
+backups
+
+Merchant/contact history автоматически не удалять.
+
+==================================================
+90. README
+==================================================
+
+Создать подробный README.md НА РУССКОМ ЯЗЫКЕ.
+
+README должен объяснять:
+
+- что делает бот;
+- architecture;
+- requirements;
+- Python version;
+- создание venv на Windows;
+- установка dependencies;
+- создание Telegram bot;
+- получение BOT_TOKEN;
+- заполнение .env;
+- запуск на Windows;
+- запуск tests;
+- Binance diagnostic;
+- создание Google Service Account;
+- включение Google Sheets API;
+- credentials;
+- предоставление доступа к Spreadsheet;
+- Alembic migrations;
+- backup;
+- restore;
+- production deployment;
+- systemd;
+- logs;
+- update procedure;
+- troubleshooting.
+
+==================================================
+91. INSTALLATION.MD
+==================================================
+
+Создать отдельную подробную инструкцию.
+
+Разделы:
+
+Windows local development
+
+Ubuntu production installation
+
+==================================================
+92. WINDOWS
+==================================================
+
+Инструкция должна быть примерно:
+
+git clone ...
+cd ...
+
+python -m venv .venv
+
+.venv\Scripts\activate
+
+python -m pip install --upgrade pip
+
+pip install -r requirements.txt
+
+copy .env.example .env
+
+отредактировать .env
+
+alembic upgrade head
+
+python scripts/test_binance.py
+
+python run.py
+
+Но адаптируй под фактическую структуру проекта.
+
+==================================================
+93. UBUNTU
+==================================================
+
+Написать команды:
+
+apt update
+
+установка Python и необходимых packages
+
+создание:
+
+/opt/binance-p2p-monitor
+
+создание venv
+
+dependencies
+
+.env
+
+Alembic
+
+systemd
+
+enable/start.
+
+==================================================
+94. REQUIREMENTS
+==================================================
+
+Использовать requirements.txt либо pyproject.toml.
+
+Если используешь pyproject.toml, всё равно сделай installation максимально простой.
+
+Не требовать Poetry, если это не дает реального преимущества.
+
+==================================================
+95. CODE QUALITY
+==================================================
+
+Не создавать giant main.py.
+
+Использовать:
+
+type hints
+clear naming
+docstrings для сложных компонентов
+centralized exception handling
+minimum global mutable state
+
+Не создавать чрезмерно сложный enterprise architecture.
+
+Это один deployable Python application.
+
+==================================================
+96. NO PLACEHOLDERS
+==================================================
+
+Недопустимо оставлять production code:
+
+pass
+
+TODO: implement
+
+mock response
+
+fake Binance implementation
+
+"реализуйте самостоятельно"
+
+Mocks разрешены только в tests.
+
+Все основные функции должны быть реализованы.
+
+==================================================
+97. ERROR HANDLING
+==================================================
+
+Telegram user никогда не должен видеть Python traceback.
+
+Пользователь получает понятную ошибку.
+
+Полный traceback записывается в logs.
+
+==================================================
+98. PROFILE SETTINGS
+==================================================
+
+MonitoringProfile должен позволять настроить:
+
+Name
+Enabled
+Provider
+Assets
+Fiats
+Directions
+Merchant filters
+Payment methods
+Minimum completion rate
+Minimum orders
+Minimum 30d orders
+Extract contacts
+Interval
+Request delay
+Max pages
+Max ads
+Notify new merchant
+Notify new contact
+Notify new ad
+Notification chats
+Initial scan behavior
+
+==================================================
+99. GLOBAL SETTINGS
+==================================================
+
+Admin panel -> Settings:
+
+Timezone
+Google Sheets URL
+Default notification chat
+Notification batching threshold
+Quiet hours
+Request timeout
+Retry count
+Data retention
+Automatic backup
+Backup time
+
+Infrastructure secrets через Telegram не менять.
+
+==================================================
+100. ADMIN MANAGEMENT
+==================================================
+
+Админка должна позволять:
+
+List admins
+Add admin
+Remove admin
+Enable admin
+Disable admin
+Change role
+
+При добавлении можно указать:
+
+@username
+
+После взаимодействия пользователя с ботом привязать numeric user_id.
+
+По умолчанию:
+
+@sergebybitp2p
+
+==================================================
+101. CHAT MANAGEMENT
+==================================================
+
+Админка:
+
+Allowed Chats
+
+По умолчанию:
+
+930460307
+
+Функции:
+
+Add chat ID
+Remove
+Enable
+Disable
+Commands ON/OFF
+Notifications ON/OFF
+
+==================================================
+102. STATUS OF EXTERNAL SERVICES
+==================================================
+
+Показывать:
+
+Binance ??/??
+Google Sheets ??/??/? Disabled
+Database ??/??
+Telegram ??
+
+Сохранять timestamp последней успешной проверки.
+
+==================================================
+103. SCAN ALGORITHM
+==================================================
+
+Пример логики scan:
+
+1. Load MonitoringProfile.
+2. Acquire profile lock.
+3. Create ScanRun.
+4. Для каждой комбинации:
+   asset
+   fiat
+   direction
+
+   запросить Binance pages.
+
+5. Map raw data в internal models.
+6. Deduplicate advertisements.
+7. Deduplicate merchants.
+8. Apply merchant filters.
+9. Extract contacts.
+10. Transactionally update DB.
+11. Determine:
+    new merchants
+    new contacts
+    new ads
+    returned merchants.
+12. Commit DB.
+13. Queue Sheets synchronization.
+14. Queue Telegram notifications.
+15. Finish ScanRun.
+16. Release lock.
+
+Даже если Sheets/Telegram notification failed:
+
+успешно собранные данные не должны потеряться.
+
+==================================================
+104. FIRST SCAN ALGORITHM
+==================================================
+
+Если:
+
+profile.initial_sync_completed == False
+
+то:
+
+scan normally
+save merchants
+save contacts
+save advertisements
+sync Sheets
+
+но:
+
+не отправлять individual new merchant notifications по умолчанию.
+
+После успешного scan:
+
+initial_sync_completed = True
+
+отправить summary.
+
+==================================================
+105. MERCHANT FILTER PIPELINE
+==================================================
+
+Raw Binance response
+v
+Mapper
+v
+Internal Merchant
+v
+Filters
+v
+Persistence / results
+
+Filters не должны читать raw JSON.
+
+==================================================
+106. CONTACT PIPELINE
+==================================================
+
+remarks
++
+autoReplyMsg
++
+other allowed public text
+v
+ContactExtractor
+v
+validation
+v
+normalization
+v
+deduplication
+v
+Contact entities
+
+==================================================
+107. BINANCE FAILOVER
+==================================================
+
+Если используются несколько Binance endpoints:
+
+создать понятную policy.
+
+Например:
+
+Agent API primary.
+
+Если он не предоставляет required data либо несколько раз подряд недоступен:
+
+Web API fallback.
+
+Не переключаться на каждом отдельном request.
+
+Сохранять provider endpoint health state.
+
+==================================================
+108. RECOVERY
+==================================================
+
+После восстановления primary API:
+
+можно вернуться на primary после health check.
+
+Уведомить администратора только если это действительно полезно.
+
+==================================================
+109. PERFORMANCE
+==================================================
+
+Не оптимизировать преждевременно, но:
+
+- reusable HTTP client;
+- batch DB operations;
+- indexes;
+- Google batch updates;
+- concurrency limit;
+- merchant cache.
+
+Создать DB indexes минимум для:
+
+Merchant(provider, external_id)
+Contact(merchant_id, normalized_value)
+Advertisement(provider, external_ad_id)
+Merchant(last_seen)
+
+==================================================
+110. UNIQUE CONSTRAINTS
+==================================================
+
+На уровне DB также защититься от duplicates.
+
+Например:
+
+Merchant:
+UNIQUE(provider, external_id)
+
+Advertisement:
+UNIQUE(provider, external_ad_id)
+
+Contact:
+разумный unique constraint по merchant/type/normalized_value.
+
+Не полагаться только на Python logic.
+
+==================================================
+111. ALEMBIC
+==================================================
+
+Создать initial migration.
+
+После:
+
+alembic upgrade head
+
+должны создаваться все таблицы.
+
+==================================================
+112. DEVELOPMENT SEED
+==================================================
+
+При первом запуске автоматически создать:
+
+initial admin username:
+sergebybitp2p
+
+initial allowed chat:
+930460307
+
+Но сделать операцию idempotent.
+
+Повторный restart не должен создавать duplicates.
+
+==================================================
+113. TIMEZONE
+==================================================
+
+Default:
+
+Europe/Kyiv
+
+Не использовать hardcoded UTC+2/UTC+3, поскольку есть DST.
+
+Использовать zoneinfo.
+
+==================================================
+114. MANUAL REFRESH MERCHANT
+==================================================
+
+В Merchant card:
+
+?? Refresh
+
+Если Binance позволяет запросить конкретного merchant:
+
+обновить его.
+
+Если нет:
+
+выполнить подходящий targeted scan.
+
+==================================================
+115. ADMIN AUDIT
+==================================================
+
+Желательно хранить audit log административных изменений:
+
+кто
+когда
+что изменил
+
+Например:
+
+admin X changed profile interval 300 -> 600.
+
+Не хранить sensitive secrets.
+
+==================================================
+116. NOTIFICATION QUEUE
+==================================================
+
+Создать внутреннюю очередь notifications.
+
+Она должна:
+
+- ограничивать скорость;
+- retry temporary Telegram errors;
+- не блокировать monitoring;
+- предотвращать duplicates.
+
+==================================================
+117. SHEETS QUEUE
+==================================================
+
+Аналогично synchronization с Google Sheets не должна блокировать основной scan дольше необходимого.
+
+Если synchronization failed:
+
+retry позже.
+
+==================================================
+118. BACKUP DIRECTORY
+==================================================
+
+Использовать:
+
+backups/
+
+Добавить в .gitignore содержимое backups.
+
+Backup filename:
+
+bot_YYYY-MM-DD_HH-MM-SS.db
+
+==================================================
+119. STARTUP CHECKS
+==================================================
+
+При старте:
+
+1. Load settings.
+2. Validate BOT_TOKEN exists.
+3. Ensure data/log/backups directories exist.
+4. Initialize DB.
+5. Check migrations/state.
+6. Seed initial admin/chat.
+7. Initialize HTTP client.
+8. Initialize Telegram.
+9. Restore scheduler jobs.
+10. Start monitoring.
+
+Не делать приложение полностью неработоспособным только потому, что Google Sheets отключен.
+
+==================================================
+120. GOOGLE SHEETS OPTIONAL STATE
+==================================================
+
+Google Sheets statuses:
+
+Disabled
+Connected
+Permission Error
+API Error
+
+Если disabled:
+
+никаких постоянных warnings.
+
+==================================================
+121. COMMAND ACCESS
+==================================================
+
+Проверять одновременно:
+
+authorized user
+
+и, где требуется:
+
+allowed chat.
+
+Superadmin private chat должен быть корректно предусмотрен согласно выбранной security policy.
+
+Задокументировать policy.
+
+==================================================
+122. BOT UI LANGUAGE
+==================================================
+
+Основной интерфейс бота сделать на русском языке.
+
+Код, variable names и technical identifiers - на английском.
+
+==================================================
+123. UX
+==================================================
+
+Минимизировать ручной ввод.
+
+Где возможно использовать buttons.
+
+После изменения настройки показывать:
+
+старое значение
+новое значение
+
+и confirmation.
+
+==================================================
+124. MONITORING SUMMARY
+==================================================
+
+Добавить возможность получать summary после каждого scan или только при изменениях.
+
+Настройка:
+
+Never
+Only when changes found
+Always
+
+Default:
+
+Only when changes found.
+
+==================================================
+125. DAILY SUMMARY
+==================================================
+
+Предусмотреть optional daily summary.
+
+Например в 09:00 Europe/Kyiv:
+
+?? Binance P2P Daily Summary
+
+New merchants: 17
+New Telegram contacts: 9
+New phones: 4
+New ads: 31
+Total merchants: 1,284
+
+Top monitored fiat:
+UAH: ...
+PLN: ...
+
+Функция configurable.
+
+==================================================
+126. README TROUBLESHOOTING
+==================================================
+
+Описать:
+
+Bot token invalid
+Binance 403
+Binance 429
+Google Sheets permission denied
+SQLite locked
+Alembic migration error
+systemd restart loop
+Telegram chat not allowed
+Admin username not binding
+
+==================================================
+127. SYSTEMD UPDATE PROCEDURE
+==================================================
+
+В документации показать безопасное обновление:
+
+sudo systemctl stop binance-p2p-monitor
+
+backup
+
+git pull
+
+activate venv
+
+pip install -r requirements.txt
+
+alembic upgrade head
+
+pytest / smoke test
+
+sudo systemctl start binance-p2p-monitor
+
+==================================================
+128. NO DOCKER
+==================================================
+
+ВАЖНО:
+
+НЕ СОЗДАВАТЬ:
+
+Dockerfile
+docker-compose.yml
+docker-compose.yaml
+Docker-specific scripts
+Docker-specific instructions.
+
+Docker вообще не является частью проекта.
+
+Все должно работать напрямую через Python virtual environment.
+
+==================================================
+129. DEVELOPMENT COMMANDS
+==================================================
+
+Основные команды должны быть простыми:
+
+python run.py
+
+pytest
+
+ruff check .
+
+alembic upgrade head
+
+python scripts/test_binance.py
+
+python scripts/backup.py
+
+==================================================
+130. FINAL VALIDATION
+==================================================
+
+Перед завершением проекта самостоятельно выполнить, если environment позволяет:
+
+python -m compileall app
+
+ruff check .
+
+pytest
+
+alembic upgrade head
+
+import/startup smoke test
+
+Binance diagnostic test
+
+Проверить, что приложение действительно импортируется и стартует.
+
+==================================================
+131. IMPLEMENTATION ORDER
+==================================================
+
+Работать по этапам.
+
+Этап 1:
+
+Исследовать Binance API.
+
+Создать:
+
+scripts/test_binance.py
+
+Получить фактическую response schema.
+
+Этап 2:
+
+Создать:
+
+internal models
+provider abstraction
+Binance provider
+ContactExtractor.
+
+Этап 3:
+
+Database
+SQLAlchemy models
+repositories
+Alembic
+deduplication.
+
+Этап 4:
+
+MonitoringService
+scheduler
+filters
+baseline.
+
+Этап 5:
+
+Telegram bot
+authorization
+admin panel
+FSM
+Monitoring Profiles.
+
+Этап 6:
+
+notifications
+notification queue
+health monitoring.
+
+Этап 7:
+
+Google Sheets
+sync queue
+retry.
+
+Этап 8:
+
+CSV export
+backup
+restore
+logs.
+
+Этап 9:
+
+systemd
+README
+INSTALLATION.
+
+Этап 10:
+
+tests
+lint
+final validation.
+
+==================================================
+132. НЕ ОСТАНАВЛИВАТЬСЯ ПОСЛЕ ПЛАНА
+==================================================
+
+Сначала составь короткий implementation plan.
+
+После этого СРАЗУ приступай к реализации.
+
+Не останавливайся после architecture discussion и не жди моего подтверждения после каждого этапа.
+
+==================================================
+133. AUTONOMOUS DEVELOPMENT
+==================================================
+
+Работай как autonomous senior developer.
+
+Не задавай мне вопросы по мелким техническим решениям.
+
+Если есть несколько вариантов:
+
+1. проанализируй;
+2. выбери наиболее надежный;
+3. кратко задокументируй решение;
+4. реализуй.
+
+Спрашивай только если без информации действительно невозможно продолжить.
+
+==================================================
+134. BINANCE REALITY OVER ASSUMPTIONS
+==================================================
+
+Если во время разработки выяснится, что мои предположения о Binance API неверны:
+
+НЕ имитируй API.
+
+НЕ создавай fake production implementation.
+
+Исследуй фактическое поведение.
+
+Измени архитектуру/mapper/client под реальное API.
+
+Задокументируй отличие.
+
+==================================================
+135. COMPLIANCE
+==================================================
+
+Использовать только данные, которые Binance законно предоставляет приложению.
+
+Не реализовывать:
+
+CAPTCHA bypass
+Cloudflare bypass
+credential theft
+account takeover
+скрытую авторизацию
+обход технических ограничений Binance.
+
+Если публичный endpoint перестал предоставлять данные:
+
+зафиксировать проблему и уведомлять admin.
+
+==================================================
+136. КРИТЕРИИ ГОТОВНОСТИ
+==================================================
+
+Проект считается готовым только если:
+
+- Telegram bot запускается;
+- admin authorization работает;
+- initial @sergebybitp2p предусмотрен;
+- chat_id 930460307 предусмотрен;
+- Monitoring Profiles работают;
+- Binance scan работает;
+- pagination работает;
+- filters работают;
+- merchants сохраняются;
+- duplicates не создаются;
+- contacts извлекаются;
+- initial baseline работает;
+- notifications работают;
+- restart не превращает старых merchants в новых;
+- Google Sheets работает или корректно отключается;
+- CSV export работает;
+- SQLite backup работает;
+- Alembic migrations работают;
+- tests проходят;
+- Windows local запуск описан;
+- Ubuntu systemd deployment описан;
+- Docker нигде не требуется.
+
+==================================================
+137. ПРИОРИТЕТЫ
+==================================================
+
+Приоритеты:
+
+1. Надежное получение реальных Binance P2P data.
+2. Корректный merchant ID.
+3. Отсутствие duplicates.
+4. Сохранность данных.
+5. Корректное определение New Merchant.
+6. Contact extraction.
+7. Initial baseline без notification spam.
+8. Надежный scheduler.
+9. Notifications.
+10. Удобная Telegram admin panel.
+11. Google Sheets synchronization.
+12. Backup.
+13. Расширяемость.
+14. Производительность.
+15. Внешний вид UI.
+
+==================================================
+138. ИТОГОВЫЙ РЕЗУЛЬТАТ
+==================================================
+
+Я ожидаю получить полностью готовый repository.
+
+На Windows после:
+
+python -m venv .venv
+
+.venv\Scripts\activate
+
+pip install -r requirements.txt
+
+копирования:
+
+.env.example -> .env
+
+заполнения BOT_TOKEN
+
+выполнения migrations:
+
+alembic upgrade head
+
+и:
+
+python run.py
+
+бот должен запуститься.
+
+Docker НЕ установлен и использовать его нельзя.
+
+==================================================
+139. DEFAULT VALUES
+==================================================
+
+Обязательно предусмотреть defaults:
+
+INITIAL_ADMIN_USERNAME=sergebybitp2p
+
+INITIAL_ALLOWED_CHAT_ID=930460307
+
+TIMEZONE=Europe/Kyiv
+
+DATABASE_URL=sqlite+aiosqlite:///./data/bot.db
+
+При первом старте эти значения должны быть безопасно и idempotent перенесены в DB там, где это требуется.
+
+==================================================
+140. ФИНАЛЬНОЕ ТРЕБОВАНИЕ
+==================================================
+
+Не просто рассказывай мне, как написать этот проект.
+
+СОЗДАЙ ЕГО.
+
+Не сокращай функциональность без технической причины.
+
+Не оставляй TODO вместо основных функций.
+
+Не останавливайся после создания структуры файлов.
+
+Пиши production code, запускай доступные проверки, исправляй найденные ошибки и продолжай до рабочего состояния.
+
+Начни с:
+
+1. анализа текущего repository/environment;
+2. короткого implementation plan;
+3. реального Binance diagnostic script;
+4. проверки Binance API;
+5. затем последовательно реализуй весь проект.
+
+Если обнаружишь проблему или невозможность реализации конкретной функции из-за фактических ограничений Binance - четко зафиксируй это, реализуй максимально надежный доступный вариант и продолжай остальные части проекта.
