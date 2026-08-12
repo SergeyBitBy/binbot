@@ -1,6 +1,5 @@
 from aiogram.fsm.state import State, StatesGroup
 
-
 class ProfileForm(StatesGroup):
     name = State()
     asset = State()
@@ -8,5 +7,5 @@ class ProfileForm(StatesGroup):
     trade_type = State()
     scan_interval = State()
 
-class MerchantSearchForm(StatesGroup):
-    query = State()
+class ProfileEditForm(StatesGroup):
+    interval = State()

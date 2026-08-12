@@ -60,7 +60,8 @@ def get_profile_detail_keyboard(profile_id: int, is_active: bool, merchant_check
             InlineKeyboardButton(text=check_text, callback_data=f"prof_check_{profile_id}"),
         ],
         [
-            InlineKeyboardButton(text="💳 Изменить Способы Оплаты", callback_data=f"prof_paytypes_{profile_id}"),
+            InlineKeyboardButton(text="⏱ Изменить Интервал", callback_data=f"prof_interval_{profile_id}"),
+            InlineKeyboardButton(text="💳 Способы Оплаты", callback_data=f"prof_paytypes_{profile_id}"),
         ],
         [
             InlineKeyboardButton(text="🗑 Удалить Профиль", callback_data=f"prof_delete_confirm_{profile_id}"),
@@ -88,6 +89,13 @@ def get_paytypes_multiselect_keyboard(profile_id: int, selected_paytypes: List[s
 
     buttons.append([InlineKeyboardButton(text="💾 Сохранить Изменения", callback_data=f"prof_view_{profile_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_wizard_nav_keyboard(prev_step_data: Optional[str] = None) -> InlineKeyboardMarkup:
+    row = []
+    if prev_step_data:
+        row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=prev_step_data))
+    row.append(InlineKeyboardButton(text="❌ Отмена", callback_data="prof_cancel"))
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 def get_back_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main")]])
