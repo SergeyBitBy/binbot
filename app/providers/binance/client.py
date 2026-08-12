@@ -1,16 +1,11 @@
 import asyncio
 import logging
 import random
-from typing import Any
-
+from typing import Any, Dict, Optional
 import httpx
 
 from app.config.settings import settings
-from app.providers.binance.exceptions import (
-    BinanceAPIError,
-    BinanceNetworkError,
-    BinanceRateLimitError,
-)
+from app.providers.binance.exceptions import BinanceAPIError, BinanceNetworkError, BinanceRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +22,8 @@ class BinanceClient:
         self.timeout = timeout or settings.binance_request_timeout
         self.client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True)
 
-    def _get_headers() -> dict[str, str]:
+    @staticmethod
+    def _get_headers() -> Dict[str, str]:
         return {
             "Accept": "*/*",
             "Accept-Encoding": "gzip, deflate, br",
@@ -39,7 +35,7 @@ class BinanceClient:
             "Pragma": "no-cache",
         }
 
-    async def search_ads(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def search_ads(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         headers = self._get_headers()
         max_retries = settings.binance_max_retries
         
