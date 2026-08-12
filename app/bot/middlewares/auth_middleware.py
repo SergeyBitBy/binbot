@@ -1,7 +1,5 @@
 import logging
-from collections.abc import Awaitable, Callable
-from typing import Any
-
+from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
@@ -16,9 +14,9 @@ class AuthMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
-        data: dict[str, Any],
+        data: Dict[str, Any],
     ) -> Any:
         user_id = None
         username = None
@@ -33,12 +31,12 @@ class AuthMiddleware(BaseMiddleware):
             username = event.from_user.username if event.from_user else None
             chat_id = event.message.chat.id if event.message and event.message.chat else None
 
-        # Check default config bypasses (Section 139)
         clean_username = username.lower().lstrip("@") if username else ""
         initial_admin = settings.initial_admin_username.lower().lstrip("@")
         initial_chat = settings.initial_allowed_chat_id
 
-        if (clean_username and clean_username == initial_admin) or (chat_id and chat_id == initial_chat):
+        # Allow initial admin by username or allowed chat_id or user_id
+        if (clean_username and clean_username == initial_admin) or (chat_id and chat_id == initial_chat) or (user_id and user_id == initial_chat):
             return await handler(event, data)
 
         async with AsyncSessionLocal() as session:
@@ -51,8 +49,15 @@ class AuthMiddleware(BaseMiddleware):
 
         logger.warning(f"Unauthorized access attempt by user_id={user_id}, username={username}, chat_id={chat_id}")
         
+        deny_text = (
+            f"⛔ <b>Доступ запрещен.</b> У вас нет прав для управления этим ботом.\n\n"
+            f"🆔 <b>Ваш Telegram User ID:</b> <code>{user_id}</code>\n"
+            f"💬 <b>Ваш Chat ID:</b> <code>{chat_id}</code>\n"
+            f"👤 <b>Ваш Username:</b> <code>@{username or 'Не задан'}</code>"
+        )
+
         if isinstance(event, Message):
-            await event.answer("⛔ <b>Доступ запрещен.</b> У вас нет прав для управления ботом.", parse_mode="HTML")
+            await event.answer(deny_text, parse_mode="HTML")
         elif isinstance(event, CallbackQuery):
             await event.answer("⛔ Доступ запрещен", show_alert=True)
             
