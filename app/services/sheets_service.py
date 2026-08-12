@@ -56,6 +56,12 @@ class GoogleSheetsService:
             setting = res.scalar_one_or_none()
             return setting is not None and setting.value.lower() == "true"
 
+    async def is_auto_contacts_only_enabled(self) -> bool:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(SystemSetting).where(SystemSetting.key == "google_sheets_auto_contacts_only"))
+            setting = res.scalar_one_or_none()
+            return setting is not None and setting.value.lower() == "true"
+
     async def initialize_with_status(self) -> Tuple[bool, str]:
         self.credentials_path = self._find_credentials_file()
         self.spreadsheet_id = await self.get_effective_spreadsheet_id()
@@ -210,7 +216,9 @@ class GoogleSheetsService:
 
     async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
         if await self.is_auto_export_enabled():
-            await self.sync_merchants_batch([(merchant, contacts)])
+            contacts_only = await self.is_auto_contacts_only_enabled()
+            if not contacts_only or bool(contacts):
+                await self.sync_merchants_batch([(merchant, contacts)])
 
     async def sync_merchants_batch(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
         if not self._sheet or not merchant_contacts_list:

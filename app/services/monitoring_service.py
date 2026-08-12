@@ -67,6 +67,7 @@ class MonitoringService:
 
         # Accumulate newly discovered merchants for batch sync at end of scan
         merchants_to_sheet_sync = []
+        auto_contacts_only = await self.sheets_service.is_auto_contacts_only_enabled()
 
         try:
             logger.info(f"Starting scan for profile '{profile.name}' ({profile.asset}/{profile.fiat} {profile.trade_type})...")
@@ -114,7 +115,8 @@ class MonitoringService:
                         new_contacts_count += len(new_c)
 
                     if is_new_m or new_c:
-                        merchants_to_sheet_sync.append((merchant, new_c))
+                        if not auto_contacts_only or bool(new_c or merchant.contacts):
+                            merchants_to_sheet_sync.append((merchant, new_c or merchant.contacts))
 
                     # Extract payment method names safely from payMethods
                     pay_method_names = []

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
+from app.db.repositories.merchant_repo import MerchantRepository
 from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
@@ -73,45 +74,25 @@ async def cb_settings_menu(call: CallbackQuery):
     q_start = await get_setting("quiet_hours_start", "23:00")
     q_end = await get_setting("quiet_hours_end", "07:00")
     contact_ext = await get_setting("contact_extraction_enabled", "true")
-    sheet_id = await get_setting("google_spreadsheet_id", "Не задан")
-    sheets_auto = await get_setting("google_sheets_auto_export", "false")
-
-    # Check if service account file exists
-    json_path = Path("service_account.json")
-    if json_path.exists():
-        try:
-            js_data = json.loads(json_path.read_text(encoding="utf-8"))
-            client_email = js_data.get("client_email", "Файл загружен")
-            json_status = f"🟢 Загружен (<code>{client_email}</code>)"
-        except Exception:
-            json_status = "🟢 Файл найден"
-    else:
-        json_status = "🔴 Файл отсутствует"
 
     mon_is_on = global_mon.lower() == "true"
     quiet_is_on = quiet_hours.lower() == "true"
     contact_is_on = contact_ext.lower() == "true"
-    sheets_auto_is_on = sheets_auto.lower() == "true"
 
     mon_status = "🟢 Включен" if mon_is_on else "🔴 Выключен"
     quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_is_on else "🔴 Выключено"
     contact_status = "🟢 Включен" if contact_is_on else "🔴 Выключен"
-    sheets_auto_status = "🟢 Автоматический" if sheets_auto_is_on else "🔴 Ручной"
 
     text = (
         "⚙️ <b>ГЛОБАЛЬНЫЕ НАСТРОЙКИ СИСТЕМЫ</b>\n\n"
         f"⏯ <b>Автоматический Мониторинг:</b> {mon_status}\n"
         f"🌙 <b>Тихое Время (Quiet Hours):</b> {quiet_status}\n"
-        f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n\n"
-        f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
-        f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
-        f"🔄 <b>Режим Экспорта Таблицы:</b> {sheets_auto_status}\n"
+        f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n"
     )
 
     btn_mon = "⏯ Анализ: 🟢 ВКЛ" if mon_is_on else "⏯ Анализ: 🔴 ВЫКЛ"
     btn_quiet = "🌙 Тихое Время: 🟢 ВКЛ" if quiet_is_on else "🌙 Тихое Время: 🔴 ВЫКЛ"
     btn_contacts = "🔍 Контакты: 🟢 ВКЛ" if contact_is_on else "🔍 Контакты: 🔴 ВЫКЛ"
-    btn_sheets_auto = "🔄 Экспорт: 🟢 АВТО" if sheets_auto_is_on else "🔄 Экспорт: 🔴 РУЧНОЙ"
 
     buttons = [
         [
@@ -123,12 +104,7 @@ async def cb_settings_menu(call: CallbackQuery):
             InlineKeyboardButton(text=btn_contacts, callback_data="toggle_contact_extraction"),
         ],
         [
-            InlineKeyboardButton(text="📊 Ссылка/ID Google Таблицы", callback_data="set_google_sheet_id"),
-            InlineKeyboardButton(text="📄 Загрузить service_account.json", callback_data="upload_service_account"),
-        ],
-        [
-            InlineKeyboardButton(text=btn_sheets_auto, callback_data="toggle_sheets_auto"),
-            InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="run_google_sheets_export_prompt"),
+            InlineKeyboardButton(text="📊 Настройки Google Sheets", callback_data="menu_google_sheets"),
         ],
         [
             InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main"),
@@ -136,6 +112,78 @@ async def cb_settings_menu(call: CallbackQuery):
     ]
 
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "menu_google_sheets")
+async def cb_google_sheets_menu(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    sheet_id = await get_setting("google_spreadsheet_id", "Не задан")
+    sheets_auto = await get_setting("google_sheets_auto_export", "false")
+    auto_contacts = await get_setting("google_sheets_auto_contacts_only", "false")
+
+    json_path = Path("service_account.json")
+    if json_path.exists():
+        try:
+            js_data = json.loads(json_path.read_text(encoding="utf-8"))
+            client_email = js_data.get("client_email", "Файл загружен")
+            json_status = f"🟢 Загружен (<code>{client_email}</code>)"
+        except Exception:
+            json_status = "🟢 Файл найден"
+    else:
+        json_status = "🔴 Файл отсутствует"
+
+    sheets_auto_is_on = sheets_auto.lower() == "true"
+    auto_contacts_is_on = auto_contacts.lower() == "true"
+
+    sheets_auto_status = "🟢 Включен (Авто)" if sheets_auto_is_on else "🔴 Выключен (Ручной)"
+    filter_status = "📞 Только с контактами" if auto_contacts_is_on else "🌐 Все найденные мерчанты"
+
+    text = (
+        "📊 <b>НАСТРОЙКИ ИНТЕГРАЦИИ GOOGLE SHEETS</b>\n\n"
+        f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
+        f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
+        f"🔄 <b>Авто-Экспорт:</b> {sheets_auto_status}\n"
+        f"🎯 <b>Фильтр Авто-Экспорта:</b> {filter_status}\n"
+    )
+
+    btn_auto = "🔄 Авто-Экспорт: 🟢 ВКЛ" if sheets_auto_is_on else "🔄 Авто-Экспорт: 🔴 ВЫКЛ"
+    btn_filter = "🎯 Фильтр Авто: 📞 С контактами" if auto_contacts_is_on else "🎯 Фильтр Авто: 🌐 Все"
+
+    buttons = [
+        [
+            InlineKeyboardButton(text="📊 Ссылка/ID Google Таблицы", callback_data="set_google_sheet_id"),
+            InlineKeyboardButton(text="📄 Загрузить service_account.json", callback_data="upload_service_account"),
+        ],
+        [
+            InlineKeyboardButton(text=btn_auto, callback_data="toggle_sheets_auto"),
+            InlineKeyboardButton(text=btn_filter, callback_data="toggle_sheets_auto_contacts_only"),
+        ],
+        [
+            InlineKeyboardButton(text="📥 Запустить Ручной Экспорт", callback_data="run_google_sheets_export_prompt"),
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_settings"),
+        ],
+    ]
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "toggle_sheets_auto_contacts_only")
+async def cb_toggle_sheets_auto_contacts(call: CallbackQuery):
+    current = await get_setting("google_sheets_auto_contacts_only", "false")
+    new_val = "false" if current.lower() == "true" else "true"
+    await set_setting("google_sheets_auto_contacts_only", new_val)
+
+    status_msg = "📞 Фильтр Авто: ТОЛЬКО С КОНТАКТАМИ" if new_val == "true" else "🌐 Фильтр Авто: ВСЕ МЕРЧАНТЫ"
+    try:
+        await call.answer(status_msg, show_alert=True)
+    except Exception:
+        pass
+
+    await cb_google_sheets_menu(call)
 
 @router.callback_query(F.data == "toggle_sheets_auto")
 async def cb_toggle_sheets_auto(call: CallbackQuery):
@@ -149,7 +197,7 @@ async def cb_toggle_sheets_auto(call: CallbackQuery):
     except Exception:
         pass
 
-    await cb_settings_menu(call)
+    await cb_google_sheets_menu(call)
 
 @router.callback_query(F.data == "upload_service_account")
 async def cb_upload_service_account_start(call: CallbackQuery, state: FSMContext):
@@ -254,7 +302,7 @@ async def cb_run_sheets_prompt(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Экспортировать всех (Обновить таблицу)", callback_data="run_google_sheets_all")],
         [InlineKeyboardButton(text="📞 Экспортировать только с контактами", callback_data="run_google_sheets_contacts")],
-        [InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_settings")],
+        [InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_google_sheets")],
     ])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
@@ -281,13 +329,11 @@ async def cb_run_sheets_export_do(call: CallbackQuery):
         repo = MerchantRepository(session)
         merchants, _ = await repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
 
-    count = 0
-    for m in merchants:
-        await sheets_service.sync_merchant(m, m.contacts)
-        count += 1
+    pairs = [(m, m.contacts) for m in merchants]
+    await sheets_service.overwrite_all_merchants(pairs)
 
     try:
-        await call.answer(f"✅ Успешно экспортировано {count} мерчантов!", show_alert=True)
+        await call.answer(f"✅ Успешно экспортировано {len(pairs)} мерчантов!", show_alert=True)
     except Exception:
         pass
-    await cb_settings_menu(call)
+    await cb_google_sheets_menu(call)
