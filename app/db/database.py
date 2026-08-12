@@ -1,5 +1,6 @@
 import logging
 from sqlalchemy import select, update
+from sqlalchemy.events import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config.settings import settings
@@ -11,7 +12,16 @@ engine = create_async_engine(
     settings.database_url,
     echo=False,
     future=True,
+    connect_args={"timeout": 30.0},
 )
+
+@event.listens_for(engine.sync_engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
