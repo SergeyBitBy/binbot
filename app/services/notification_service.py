@@ -95,7 +95,7 @@ class NotificationService:
             limits_str = f" | <b>Лимиты:</b> <code>{min_amount or '0'} - {max_amount or '∞'} {fiat}</code>"
 
         text = (
-            f"🚨 <b>НОВЫЙ МЕРЧАНТ НА ВЫЧИСЛЕНИИ!</b>\n\n"
+            f"🚨 <b>Новый мерчант</b>\n\n"
             f"👤 <b>Никнейм:</b> <a href='{profile_link}'>{merchant.nickname or 'Без ника'}</a>\n"
             f"🆔 <b>UserNo:</b> <code>{merchant.user_no}</code>\n"
             f"📊 <b>Профиль:</b> {profile_name}\n"
