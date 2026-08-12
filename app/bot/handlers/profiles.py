@@ -4,7 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.keyboards.main_kb import (
-    get_main_menu_keyboard, get_profile_detail_keyboard, get_profiles_keyboard
+    get_main_menu_keyboard, get_profile_detail_keyboard, get_profiles_keyboard, get_paytypes_multiselect_keyboard
 )
 from app.bot.states.profile_states import ProfileForm
 from app.db.database import AsyncSessionLocal
@@ -26,7 +26,7 @@ async def cb_profiles_list(call: CallbackQuery):
         repo = ProfileRepository(session)
         profiles = await repo.get_all()
 
-    text = "⚙️ <b>СПИСОК ПРОФИЛЕЙ МОНИТОРИНГА</b>\n\nВыберите профиль для просмотра параметров или создайте новый:"
+    text = "⚙️ <b>СПИСОК ПРОФИЛЕЙ МОНИТОРИНГА</b>\n\nВыберите профиль для просмотра или настройки:"
     await call.message.edit_text(text, reply_markup=get_profiles_keyboard(profiles), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("prof_view_"))
@@ -42,14 +42,14 @@ async def cb_profile_view(call: CallbackQuery):
 
     await safe_answer(call)
     status = "🟢 Активен" if p.is_active else "🔴 Приостановлен"
+    merchant_filter = "🛡️ Только Проверенные (Verified)" if p.merchant_check else "🌐 Все Мерчанты"
     baseline = "✅ Завершен" if p.is_baseline_completed else "⏳ Ожидает первого сканирования"
-    locked = "🔒 Занят (Сканирование...)" if p.is_locked else "🔓 Свободен"
     pay_types_str = ", ".join(p.pay_types) if p.pay_types else "Все способы оплаты"
 
     text = (
         f"⚙️ <b>ПРОФИЛЬ МОНИТОРИНГА: {p.name}</b>\n\n"
         f"Статус: {status}\n"
-        f"Блокировка: {locked}\n"
+        f"Фильтр мерчантов: {merchant_filter}\n"
         f"Базовая линия: {baseline}\n\n"
         f"🪙 <b>Ассет:</b> <code>{p.asset}</code>\n"
         f"💵 <b>Фиат:</b> <code>{p.fiat}</code>\n"
@@ -58,7 +58,7 @@ async def cb_profile_view(call: CallbackQuery):
         f"⏱ <b>Интервал сканирования:</b> <code>{p.scan_interval_seconds} сек</code>\n"
     )
 
-    await call.message.edit_text(text, reply_markup=get_profile_detail_keyboard(p.id, p.is_active), parse_mode="HTML")
+    await call.message.edit_text(text, reply_markup=get_profile_detail_keyboard(p.id, p.is_active, p.merchant_check), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("prof_toggle_"))
 async def cb_profile_toggle(call: CallbackQuery):
@@ -72,11 +72,75 @@ async def cb_profile_toggle(call: CallbackQuery):
             status_text = "активирован" if p.is_active else "приостановлен"
             await safe_answer(call, f"Профиль {status_text}!", show_alert=True)
 
-    await cb_profiles_list(call)
+    await cb_profile_view(call)
 
-@router.callback_query(F.data.startswith("prof_delete_"))
-async def cb_profile_delete(call: CallbackQuery):
+@router.callback_query(F.data.startswith("prof_check_"))
+async def cb_profile_check_toggle(call: CallbackQuery):
     prof_id = int(call.data.split("_")[2])
+    async with AsyncSessionLocal() as session:
+        repo = ProfileRepository(session)
+        p = await repo.get_by_id(prof_id)
+        if p:
+            p.merchant_check = not p.merchant_check
+            await session.commit()
+            status_text = "Только проверенные" if p.merchant_check else "Все мерчанты"
+            await safe_answer(call, f"Фильтр изменен: {status_text}", show_alert=True)
+
+    await cb_profile_view(call)
+
+@router.callback_query(F.data.startswith("prof_paytypes_"))
+async def cb_profile_paytypes(call: CallbackQuery):
+    prof_id = int(call.data.split("_")[2])
+    async with AsyncSessionLocal() as session:
+        repo = ProfileRepository(session)
+        p = await repo.get_by_id(prof_id)
+        if not p:
+            return
+
+    await safe_answer(call)
+    text = (
+        f"💳 <b>НАСТРОЙКА БАНКОВ И СПОСОБОВ ОПЛАТЫ ({p.name})</b>\n\n"
+        "Отмечайте нужные способы оплаты галочками `[✅]`. Изменения сохраняются сразу:"
+    )
+    await call.message.edit_text(text, reply_markup=get_paytypes_multiselect_keyboard(p.id, p.pay_types), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("pay_toggle_"))
+async def cb_paytype_toggle(call: CallbackQuery):
+    parts = call.data.split("_")
+    prof_id = int(parts[2])
+    bank_name = "_".join(parts[3:])
+
+    async with AsyncSessionLocal() as session:
+        repo = ProfileRepository(session)
+        p = await repo.get_by_id(prof_id)
+        if p:
+            current_pays = list(p.pay_types or [])
+            if bank_name in current_pays:
+                current_pays.remove(bank_name)
+            else:
+                current_pays.append(bank_name)
+            p.pay_types = current_pays
+            await session.commit()
+            await safe_answer(call, f"Способ оплаты {bank_name} обновлен")
+
+    await cb_profile_paytypes(call)
+
+@router.callback_query(F.data.startswith("prof_delete_confirm_"))
+async def cb_profile_delete_confirm(call: CallbackQuery):
+    prof_id = int(call.data.split("_")[3])
+    await safe_answer(call)
+    text = "⚠️ <b>Вы уверены, что хотите полностью удалить этот профиль мониторинга?</b>"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, Удалить", callback_data=f"prof_delete_do_{prof_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"prof_view_{prof_id}"),
+        ]
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("prof_delete_do_"))
+async def cb_profile_delete_do(call: CallbackQuery):
+    prof_id = int(call.data.split("_")[3])
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
         await repo.delete(prof_id)

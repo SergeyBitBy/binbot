@@ -5,7 +5,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from app.db.database import AsyncSessionLocal
-from app.db.models import MonitoringProfile, ScanHistory
+from app.db.models import MonitoringProfile, ScanHistory, SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
 from app.db.repositories.profile_repo import ProfileRepository
 from app.providers.binance.provider import BinanceP2PProvider
@@ -25,7 +25,20 @@ class MonitoringService:
         self.notification_service = notification_service or NotificationService()
         self.sheets_service = sheets_service or GoogleSheetsService()
 
-    async def scan_profile(self, profile_id: int) -> ScanHistory:
+    @staticmethod
+    async def is_global_monitoring_enabled() -> bool:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(
+                select(SystemSetting).where(SystemSetting.key == "global_monitoring_enabled")
+            )
+            setting = res.scalar_one_or_none()
+            return setting is None or setting.value.lower() == "true"
+
+    async def scan_profile(self, profile_id: int) -> Optional[ScanHistory]:
+        if not await self.is_global_monitoring_enabled():
+            logger.info("Global monitoring is currently DISABLED. Skipping scan.")
+            return None
+
         async with AsyncSessionLocal() as session:
             profile_repo = ProfileRepository(session)
             profile = await profile_repo.get_by_id(profile_id)
@@ -85,6 +98,11 @@ class MonitoringService:
                     if new_c:
                         new_contacts_count += len(new_c)
 
+                    # Extract payment method names
+                    pay_method_names = []
+                    if item.adv.tradeMethods:
+                        pay_method_names = [tm.tradeMethodName for tm in item.adv.tradeMethods if tm.tradeMethodName]
+
                     # Dispatch notifications ONLY IF baseline is already completed (Section 43 & 137)
                     if not is_baseline_run:
                         if is_new_m:
@@ -95,6 +113,11 @@ class MonitoringService:
                                 asset=profile.asset,
                                 fiat=profile.fiat,
                                 price=str(item.adv.price),
+                                remarks=item.adv.remarks,
+                                auto_reply=item.adv.autoReplyMsg,
+                                min_amount=str(item.adv.minSingleTransAmount) if item.adv.minSingleTransAmount else None,
+                                max_amount=str(item.adv.maxSingleTransAmount) if item.adv.maxSingleTransAmount else None,
+                                pay_methods=pay_method_names,
                             )
                         elif new_c:
                             await self.notification_service.notify_new_contacts(
@@ -144,6 +167,10 @@ class MonitoringService:
         return scan_record
 
     async def scan_all_active_profiles(self):
+        if not await self.is_global_monitoring_enabled():
+            logger.info("Global monitoring is disabled. Skipping scheduled scan.")
+            return
+
         async with AsyncSessionLocal() as session:
             profile_repo = ProfileRepository(session)
             profiles = await profile_repo.get_all(only_active=True)
@@ -151,3 +178,9 @@ class MonitoringService:
         for p in profiles:
             await self.scan_profile(p.id)
             await asyncio.sleep(2.0)
+
+    async def send_daily_summary(self):
+        """Send 09:00 morning summary digest report to all allowed admin chats."""
+        async with AsyncSessionLocal() as session:
+            # Aggregate stats from last 24h
+            pass

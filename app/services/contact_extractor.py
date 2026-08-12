@@ -1,132 +1,129 @@
 import re
+import logging
+from dataclasses import dataclass
+from typing import List, Set, Tuple
 
-from pydantic import BaseModel
+logger = logging.getLogger(__name__)
 
-
-class ExtractedContact(BaseModel):
-    type: str  # telegram, whatsapp, phone, email, viber, instagram, website, other
+@dataclass(frozen=True)
+class ExtractedContact:
+    type: str  # telegram, whatsapp, viber, phone, email, instagram
     value: str
-    raw_match: str
+    raw_source: str  # remarks, auto_reply, nickname
+
+    @property
+    def raw_match(self) -> str:
+        return self.value
 
 class ContactExtractor:
-    """Regex & heuristic parser to extract contact information from merchant text."""
+    """Enhanced extractor to parse contacts from advertisement descriptions (remarks), auto-replies, and nicknames."""
 
-    TELEGRAM_PATTERNS = [
-        re.compile(r"(?:https?://)?t(?:elegram)?\.me/([a-zA-Z0-9_]{4,32})", re.IGNORECASE),
-        re.compile(r"(?:telegram|телеграм|тг|tg|тлг)\s*[:=\-]?\s*@?([a-zA-Z0-9_]{4,32})", re.IGNORECASE),
-        re.compile(r"(?<!\w)@([a-zA-Z0-9_]{4,32})(?!\w)", re.IGNORECASE),
-    ]
+    # Regex Patterns with explicit capturing group (group 1)
+    PATTERNS = {
+        "telegram": [
+            r"(?:t\.me|telegram\.me)/(?:\+)?([a-zA-Z0-9_\+]{5,64})",
+            r"(?:tg|тг|телеграм|telegram|связь|канал|чат)[:\s]*@?([a-zA-Z0-9_]{5,32})",
+            r"(?<!\w)@([a-zA-Z0-9_]{5,32})(?!\w)",
+        ],
+        "whatsapp": [
+            r"(?:wa\.me|api\.whatsapp\.com/send\?phone=)(\d{10,15})",
+            r"(?:wa|whatsapp|ватсап|ватцап|вацап)[:\s]*\+?(\d{10,15})",
+        ],
+        "viber": [
+            r"(?:viber\.click|viber://chat\?number=)(\d{10,15})",
+            r"(?:viber|вайбер)[:\s]*\+?(\d{10,15})",
+        ],
+        "email": [
+            r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+        ],
+        "instagram": [
+            r"(?:inst|instagram|инстаграм|инста)[:\s]*@?([a-zA-Z0-9._]{3,30})",
+            r"instagram\.com/([a-zA-Z0-9._]{3,30})",
+        ],
+        "phone": [
+            # International format with +
+            r"(\+\d{1,4}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9})",
+            # Local Ukrainian numbers: 0971234567, 093 123 45 67, 050-123-4567, 380971234567
+            r"(?<!\d)((?:380|0)\d{2}[-.\s]?\d{3}[-.\s]?\d{2}[-.\s]?\d{2})(?!\d)",
+        ],
+    }
 
-    WHATSAPP_PATTERNS = [
-        re.compile(r"(?:https?://)?wa\.me/(\+?[0-9]{8,15})", re.IGNORECASE),
-        re.compile(r"(?:whatsapp|вацап|ватсап|wa)\s*[:=\-]?\s*(\+?[0-9\s\-\(\)]{8,20})", re.IGNORECASE),
-    ]
-
-    VIBER_PATTERNS = [
-        re.compile(r"(?:viber|вайбер)\s*[:=\-]?\s*(\+?[0-9\s\-\(\)]{8,20})", re.IGNORECASE),
-    ]
-
-    INSTAGRAM_PATTERNS = [
-        re.compile(r"(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_\.]{3,30})", re.IGNORECASE),
-        re.compile(r"(?:inst|instagram|инста)\s*[:=\-]?\s*@?([a-zA-Z0-9_\.]{3,30})", re.IGNORECASE),
-    ]
-
-    EMAIL_PATTERNS = [
-        re.compile(r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", re.IGNORECASE),
-    ]
-
-    PHONE_PATTERNS = [
-        re.compile(r"(\+?[0-9]{1,4}[\s\-\.]?\(?[0-9]{2,4}\)?[\s\-\.]?[0-9]{3,4}[\s\-\.]?[0-9]{2,4})", re.IGNORECASE),
-    ]
-
-    URL_PATTERNS = [
-        re.compile(r"(https?://[^\s/$.?#].[^\s]*)", re.IGNORECASE),
-    ]
-
-    # Reserved words to exclude from Telegram handle false positives
-    EXCLUDED_TG_HANDLES = {
-        "binance", "support", "admin", "p2p", "trade", "bot", "usdt", "uah", "usd", "eur",
-        "gmail", "yahoo", "com", "net", "org", "http", "https", "online", "crypto", "pay",
-        "card", "bank", "mono", "privat", "revolut", "wise"
+    # Blacklist of common keywords to prevent false positive telegram matches
+    TG_BLACKLIST = {
+        "binance", "support", "admin", "p2p", "help", "bot", "online", "fast",
+        "trade", "usdt", "uah", "rub", "usd", "eur", "mono", "privat", "pumb",
+        "bank", "card", "pay", "order", "buyer", "seller", "crypto", "change",
     }
 
     @classmethod
-    def extract_contacts(cls, text: str) -> list[ExtractedContact]:
+    def extract_from_text(cls, text: str, source_label: str = "text") -> List[ExtractedContact]:
         if not text:
             return []
 
-        contacts: list[ExtractedContact] = []
-        seen_values: set[str] = set()
+        found_contacts: List[ExtractedContact] = []
+        seen_values: Set[Tuple[str, str]] = set()
 
-        # 1. Telegram
-        for pattern in cls.TELEGRAM_PATTERNS:
-            for match in pattern.finditer(text):
-                handle = match.group(1).strip()
-                if handle.lower() not in cls.EXCLUDED_TG_HANDLES and len(handle) >= 4:
-                    full_val = f"@{handle}" if not handle.startswith("@") else handle
-                    val_key = f"telegram:{full_val.lower()}"
-                    if val_key not in seen_values:
-                        seen_values.add(val_key)
-                        contacts.append(ExtractedContact(type="telegram", value=full_val, raw_match=match.group(0)))
+        clean_text = text.strip()
 
-        # 2. WhatsApp
-        for pattern in cls.WHATSAPP_PATTERNS:
-            for match in pattern.finditer(text):
-                raw_num = match.group(1)
-                clean_num = re.sub(r"[^\d+]", "", raw_num)
-                if len(re.sub(r"\D", "", clean_num)) >= 8:
-                    val_key = f"whatsapp:{clean_num}"
-                    if val_key not in seen_values:
-                        seen_values.add(val_key)
-                        contacts.append(ExtractedContact(type="whatsapp", value=clean_num, raw_match=match.group(0)))
+        for c_type, patterns in cls.PATTERNS.items():
+            for pattern in patterns:
+                for match in re.finditer(pattern, clean_text, re.IGNORECASE):
+                    val = (match.group(1) if match.lastindex else match.group(0)).strip()
+                    
+                    # Normalization
+                    if c_type == "telegram":
+                        val = val.lstrip("@").strip()
+                        if len(val) < 5 or val.lower() in cls.TG_BLACKLIST or val.isdigit():
+                            continue
+                        val = f"@{val}"
+                    elif c_type in ("phone", "whatsapp", "viber"):
+                        # Clean non-digits for phone numbers
+                        digits = re.sub(r"\D", "", val)
+                        if len(digits) < 9 or len(digits) > 15:
+                            continue
+                        if c_type == "phone" and digits.startswith("0") and len(digits) == 10:
+                            digits = f"38{digits}"  # Normalize local UA 0XX... to 380XX...
+                        val = f"+{digits}" if not digits.startswith("+") else digits
+                    elif c_type == "email":
+                        val = val.lower()
 
-        # 3. Viber
-        for pattern in cls.VIBER_PATTERNS:
-            for match in pattern.finditer(text):
-                raw_num = match.group(1)
-                clean_num = re.sub(r"[^\d+]", "", raw_num)
-                if len(re.sub(r"\D", "", clean_num)) >= 8:
-                    val_key = f"viber:{clean_num}"
-                    if val_key not in seen_values:
-                        seen_values.add(val_key)
-                        contacts.append(ExtractedContact(type="viber", value=clean_num, raw_match=match.group(0)))
+                    key = (c_type, val)
+                    if key not in seen_values:
+                        seen_values.add(key)
+                        found_contacts.append(ExtractedContact(type=c_type, value=val, raw_source=source_label))
 
-        # 4. Instagram
-        for pattern in cls.INSTAGRAM_PATTERNS:
-            for match in pattern.finditer(text):
-                handle = match.group(1).strip()
-                if handle.lower() not in cls.EXCLUDED_TG_HANDLES:
-                    val_key = f"instagram:{handle.lower()}"
-                    if val_key not in seen_values:
-                        seen_values.add(val_key)
-                        contacts.append(ExtractedContact(type="instagram", value=f"@{handle}", raw_match=match.group(0)))
-
-        # 5. Email
-        for pattern in cls.EMAIL_PATTERNS:
-            for match in pattern.finditer(text):
-                email = match.group(1).strip().lower()
-                val_key = f"email:{email}"
-                if val_key not in seen_values:
-                    seen_values.add(val_key)
-                    contacts.append(ExtractedContact(type="email", value=email, raw_match=match.group(0)))
-
-        # 6. Phone Numbers (Stand-alone phone pattern)
-        for pattern in cls.PHONE_PATTERNS:
-            for match in pattern.finditer(text):
-                raw_num = match.group(1)
-                digits_only = re.sub(r"\D", "", raw_num)
-                if 10 <= len(digits_only) <= 15:
-                    clean_phone = f"+{digits_only}" if not raw_num.startswith("+") else f"+{digits_only}"
-                    # Don't add if already captured as whatsapp/viber
-                    if not any(clean_phone in k for k in seen_values):
-                        val_key = f"phone:{clean_phone}"
-                        if val_key not in seen_values:
-                            seen_values.add(val_key)
-                            contacts.append(ExtractedContact(type="phone", value=clean_phone, raw_match=match.group(0)))
-
-        return contacts
+        return found_contacts
 
     @classmethod
-    def extract_from_merchant_data(cls, nickname: str, remarks: str, auto_reply: str) -> list[ExtractedContact]:
-        combined_text = f"{nickname or ''}\n{remarks or ''}\n{auto_reply or ''}"
-        return cls.extract_contacts(combined_text)
+    def extract_from_merchant_data(
+        cls,
+        nickname: str = "",
+        remarks: str = "",
+        auto_reply: str = "",
+    ) -> List[ExtractedContact]:
+        """Extract contacts prioritize advertisement description (remarks) & auto reply, then nickname."""
+        all_contacts: List[ExtractedContact] = []
+        seen_values: Set[Tuple[str, str]] = set()
+
+        # Primary Search: Advertisement Remarks/Description
+        for c in cls.extract_from_text(remarks, source_label="remarks"):
+            key = (c.type, c.value)
+            if key not in seen_values:
+                seen_values.add(key)
+                all_contacts.append(c)
+
+        # Secondary Search: Auto Reply Message
+        for c in cls.extract_from_text(auto_reply, source_label="auto_reply"):
+            key = (c.type, c.value)
+            if key not in seen_values:
+                seen_values.add(key)
+                all_contacts.append(c)
+
+        # Fallback / Supplemental Search: Merchant Nickname
+        for c in cls.extract_from_text(nickname, source_label="nickname"):
+            key = (c.type, c.value)
+            if key not in seen_values:
+                seen_values.add(key)
+                all_contacts.append(c)
+
+        return all_contacts

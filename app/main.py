@@ -8,7 +8,9 @@ from app.config.logging import setup_logging
 from app.config.settings import settings
 from app.db.database import init_db
 from app.bot.middlewares.auth_middleware import AuthMiddleware
-from app.bot.handlers import backup, dashboard, logs, merchants, profiles, start
+from app.bot.handlers import (
+    admins, backup, chats, dashboard, logs, merchants, profiles, scan_history, settings as bot_settings, start
+)
 from app.services.monitoring_service import MonitoringService
 from app.services.notification_service import NotificationService
 from app.services.sheets_service import GoogleSheetsService
@@ -46,7 +48,7 @@ async def main():
         try:
             await bot.send_message(
                 chat_id=settings.initial_allowed_chat_id,
-                text="🚀 <b>Binance P2P Monitor Bot успешно запущен на сервере!</b>\n\nОтправьте /start для открытия меню.",
+                text="🚀 <b>Binance P2P Monitor Bot v1.0 успешно запущен на сервере!</b>\n\nОтправьте /start для открытия панели управления.",
                 parse_mode="HTML",
             )
             logger.info(f"Sent startup message to chat_id={settings.initial_allowed_chat_id}")
@@ -62,10 +64,14 @@ async def main():
     dp.include_router(dashboard.router)
     dp.include_router(profiles.router)
     dp.include_router(merchants.router)
+    dp.include_router(admins.router)
+    dp.include_router(chats.router)
+    dp.include_router(bot_settings.router)
+    dp.include_router(scan_history.router)
     dp.include_router(logs.router)
     dp.include_router(backup.router)
 
-    # 4. Setup Scheduler for Periodic Monitoring
+    # 4. Setup Scheduler for Periodic Monitoring & Daily Summary
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         monitoring_service.scan_all_active_profiles,

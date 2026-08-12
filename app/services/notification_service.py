@@ -59,6 +59,11 @@ class NotificationService:
         asset: str,
         fiat: str,
         price: str,
+        remarks: Optional[str] = None,
+        auto_reply: Optional[str] = None,
+        min_amount: Optional[str] = None,
+        max_amount: Optional[str] = None,
+        pay_methods: Optional[List[str]] = None,
     ):
         if not self.bot:
             logger.warning("NotificationService bot instance not attached.")
@@ -75,22 +80,43 @@ class NotificationService:
 
         profile_link = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
         
-        contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code>" for c in contacts])
-        if not contacts_str:
-            contacts_str = "<i>Контакты не обнаружены в описании</i>"
+        # Contacts List formatting
+        if contacts:
+            contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code> (источник: {getattr(c, 'raw_match', 'описание')})" for c in contacts])
+        else:
+            contacts_str = "<i>⚠️ Контакты не найдены в описании объявления/никнейме</i>"
+
+        # Pay Methods formatting
+        pay_str = ", ".join(pay_methods) if pay_methods else "Все способы оплаты"
+
+        # Limits formatting
+        limits_str = ""
+        if min_amount or max_amount:
+            limits_str = f" | <b>Лимиты:</b> <code>{min_amount or '0'} - {max_amount or '∞'} {fiat}</code>"
 
         text = (
             f"🚨 <b>НОВЫЙ МЕРЧАНТ НА ВЫЧИСЛЕНИИ!</b>\n\n"
             f"👤 <b>Никнейм:</b> <a href='{profile_link}'>{merchant.nickname or 'Без ника'}</a>\n"
             f"🆔 <b>UserNo:</b> <code>{merchant.user_no}</code>\n"
-            f"📊 <b>Профиль мониторинга:</b> {profile_name}\n"
-            f"💰 <b>Пара:</b> {asset}/{fiat} | <b>Цена:</b> <code>{price}</code>\n"
+            f"📊 <b>Профиль:</b> {profile_name}\n"
+            f"💰 <b>Пара:</b> {asset}/{fiat} | <b>Цена:</b> <code>{price}</code>{limits_str}\n"
+            f"💳 <b>Оплата:</b> {pay_str}\n"
             f"📈 <b>Ордеров/Месяц:</b> {merchant.month_order_count} ({merchant.month_finish_rate * 100:.1f}%)\n\n"
-            f"📞 <b>Найденные контакты:</b>\n{contacts_str}\n"
+            f"📞 <b>Извлеченные контакты:</b>\n{contacts_str}\n"
         )
-        if merchant.remarks:
-            clean_remarks = merchant.remarks[:300].replace("<", "&lt;").replace(">", "&gt;")
-            text += f"\n📝 <b>Заметки/Правила:</b>\n<i>{clean_remarks}</i>\n"
+
+        # Full Description / Remarks block
+        effective_remarks = remarks or merchant.remarks
+        if effective_remarks and effective_remarks.strip():
+            clean_remarks = effective_remarks.strip()[:600].replace("<", "&lt;").replace(">", "&gt;")
+            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>«{clean_remarks}»</i>\n"
+        else:
+            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>(Описание отсутствует в поисковой выдаче Binance)</i>\n"
+
+        effective_auto_reply = auto_reply or merchant.auto_reply_msg
+        if effective_auto_reply and effective_auto_reply.strip():
+            clean_reply = effective_auto_reply.strip()[:300].replace("<", "&lt;").replace(">", "&gt;")
+            text += f"\n💬 <b>Автоответ сделки:</b>\n<i>«{clean_reply}»</i>\n"
 
         for chat_id in chats:
             try:
