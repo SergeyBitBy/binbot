@@ -25,7 +25,7 @@ def get_main_menu_keyboard(monitoring_enabled: bool = True) -> InlineKeyboardMar
             InlineKeyboardButton(text="📜 История Сканов", callback_data="menu_scan_history"),
         ],
         [
-            InlineKeyboardButton(text="📥 Экспорт CSV", callback_data="menu_export_csv"),
+            InlineKeyboardButton(text="📊 Экспорт Google Sheets", callback_data="merch_export_sheets_prompt"),
             InlineKeyboardButton(text="💾 Бэкап БД", callback_data="menu_backup_db"),
         ],
         [
@@ -52,7 +52,7 @@ def get_profiles_keyboard(profiles: List[MonitoringProfile]) -> InlineKeyboardMa
 
 def get_profile_detail_keyboard(profile_id: int, is_active: bool, merchant_check: bool) -> InlineKeyboardMarkup:
     toggle_text = "🔴 Приостановить" if is_active else "🟢 Активировать"
-    check_text = "🛡️ Ток Проверенные: ВКЛ" if merchant_check else "🌐 Все Мерчанты: ВКЛ"
+    check_text = "🛡️ Только проверенные: ВКЛ" if merchant_check else "🌐 Все Мерчанты: ВКЛ"
 
     buttons = [
         [

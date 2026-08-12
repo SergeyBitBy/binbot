@@ -148,7 +148,12 @@ class MerchantRepository:
         return merchant, is_new_merchant, new_contacts, is_new_or_updated_ad
 
     async def get_all_merchants(
-        self, limit: int = 50, offset: int = 0, search_query: Optional[str] = None, only_verified: bool = False
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        search_query: Optional[str] = None,
+        only_verified: bool = False,
+        only_with_contacts: bool = False,
     ) -> Tuple[List[Merchant], int]:
         query = select(Merchant).options(selectinload(Merchant.contacts), selectinload(Merchant.advertisements))
         count_query = select(func.count(Merchant.id))
@@ -167,10 +172,18 @@ class MerchantRepository:
                 Merchant.user_type.ilike("%merchant%") | Merchant.user_type.ilike("%pro%")
             )
 
+        if only_with_contacts:
+            query = query.join(Merchant.contacts)
+            count_query = count_query.join(Merchant.contacts)
+
         if filters:
             for f in filters:
                 query = query.where(f)
                 count_query = count_query.where(f)
+
+        if only_with_contacts:
+            query = query.distinct()
+            count_query = count_query.distinct()
 
         total_res = await self.session.execute(count_query)
         total_count = total_res.scalar_one()
@@ -181,16 +194,26 @@ class MerchantRepository:
 
         return merchants, total_count
 
-    async def get_all(self, limit: int = 50, offset: int = 0, only_verified: bool = False) -> List[Merchant]:
-        merchants, _ = await self.get_all_merchants(limit=limit, offset=offset, only_verified=only_verified)
+    async def get_all(
+        self, limit: int = 10, offset: int = 0, only_verified: bool = False, only_with_contacts: bool = False
+    ) -> List[Merchant]:
+        merchants, _ = await self.get_all_merchants(
+            limit=limit, offset=offset, only_verified=only_verified, only_with_contacts=only_with_contacts
+        )
         return merchants
 
-    async def get_total_count(self, only_verified: bool = False) -> int:
-        count_query = select(func.count(Merchant.id))
-        if only_verified:
-            count_query = count_query.where(Merchant.user_type.ilike("%merchant%") | Merchant.user_type.ilike("%pro%"))
-        res = await self.session.execute(count_query)
-        return res.scalar_one()
+    async def add_manual_contact(self, merchant_id: int, contact_type: str, contact_value: str) -> Contact:
+        now = datetime.now(timezone.utc)
+        contact = Contact(
+            merchant_id=merchant_id,
+            type=contact_type,
+            value=contact_value,
+            raw_match="manual_entry",
+            first_seen_at=now,
+        )
+        self.session.add(contact)
+        await self.session.commit()
+        return contact
 
     async def delete_merchant(self, merchant_id: int) -> bool:
         stmt = delete(Merchant).where(Merchant.id == merchant_id)

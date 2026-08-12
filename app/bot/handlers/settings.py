@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
+from app.db.repositories.merchant_repo import MerchantRepository
 from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
@@ -26,14 +28,21 @@ async def get_setting(key: str, default: str = "") -> str:
         return s.value if s else default
 
 async def set_setting(key: str, value: str):
-    async with AsyncSessionLocal() as session:
-        res = await session.execute(select(SystemSetting).where(SystemSetting.key == key))
-        s = res.scalar_one_or_none()
-        if s:
-            s.value = value
-        else:
-            session.add(SystemSetting(key=key, value=value))
-        await session.commit()
+    """Set system setting with retry logic against database locks."""
+    for attempt in range(5):
+        try:
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(select(SystemSetting).where(SystemSetting.key == key))
+                s = res.scalar_one_or_none()
+                if s:
+                    s.value = value
+                else:
+                    session.add(SystemSetting(key=key, value=value))
+                await session.commit()
+                return
+        except Exception as e:
+            logger.warning(f"set_setting failed attempt {attempt+1}/5: {e}")
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 @router.callback_query(F.data == "toggle_global_monitoring")
 async def cb_toggle_monitoring(call: CallbackQuery):
@@ -93,7 +102,7 @@ async def cb_settings_menu(call: CallbackQuery):
             InlineKeyboardButton(text="🔄 Авто/Ручной Экспорт", callback_data="toggle_sheets_auto"),
         ],
         [
-            InlineKeyboardButton(text="📥 Запустить Экспорт в Google Таблицу", callback_data="run_google_sheets_export"),
+            InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="run_google_sheets_export_prompt"),
         ],
         [
             InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main"),
@@ -132,7 +141,7 @@ async def cb_set_google_sheet(call: CallbackQuery, state: FSMContext):
     await state.set_state(GoogleSheetsForm.sheet_id)
     text = (
         "📊 <b>НАСТРОЙКА GOOGLE ТАБЛИЦЫ</b>\n\n"
-        "Отправьте ссылку на Google Таблицу или её ID (например: `1BxiMVs0XRra5nFMdKbB...`):"
+        "Отправьте ссылку на Google Таблицу или её ID (например: `1fhTvlPkjwHQG0NIEOefA...`):"
     )
     await call.message.edit_text(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
 
@@ -141,7 +150,6 @@ async def process_google_sheet_input(message: Message, state: FSMContext):
     raw_input = message.text.strip()
     await state.clear()
 
-    # Extract ID if full URL provided
     sheet_id = raw_input
     if "docs.google.com/spreadsheets/d/" in raw_input:
         sheet_id = raw_input.split("/d/")[1].split("/")[0]
@@ -149,21 +157,54 @@ async def process_google_sheet_input(message: Message, state: FSMContext):
     await set_setting("google_spreadsheet_id", sheet_id)
     await message.answer(f"✅ <b>Google Spreadsheet ID сохранен: `{sheet_id}`</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
 
-@router.callback_query(F.data == "run_google_sheets_export")
-async def cb_run_sheets_export(call: CallbackQuery):
+@router.callback_query(F.data == "run_google_sheets_export_prompt")
+async def cb_run_sheets_prompt(call: CallbackQuery):
     sheet_id = await get_setting("google_spreadsheet_id")
-    if not sheet_id:
+    if not sheet_id or sheet_id == "Не задан":
         try:
             await call.answer("⚠️ Google Spreadsheet ID не настроен!", show_alert=True)
         except Exception:
             pass
         return
 
+    text = "📊 <b>ЭКСПОРТ ДАННЫХ В GOOGLE SHEETS</b>\n\nВыберите режим экспорта:"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Экспортировать всех (Обновить таблицу)", callback_data="run_google_sheets_all")],
+        [InlineKeyboardButton(text="📞 Экспортировать только с контактами", callback_data="run_google_sheets_contacts")],
+        [InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_settings")],
+    ])
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("run_google_sheets_"))
+async def cb_run_sheets_export_do(call: CallbackQuery):
+    target = call.data.replace("run_google_sheets_", "")
+    only_contacts = (target == "contacts")
+
     try:
-        await call.answer("📊 Выполняется экспорт данных в Google Таблицу...", show_alert=True)
+        await call.answer("📊 Экспорт в Google Таблицы запущен...", show_alert=True)
     except Exception:
         pass
 
     sheets_service = GoogleSheetsService()
     await sheets_service.initialize()
-    # Trigger export
+    if not sheets_service.is_configured():
+        try:
+            await call.answer("⚠️ Google Sheets не настроен или нет файла service_account.json", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    async with AsyncSessionLocal() as session:
+        repo = MerchantRepository(session)
+        merchants, _ = await repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
+
+    count = 0
+    for m in merchants:
+        await sheets_service.sync_merchant(m, m.contacts)
+        count += 1
+
+    try:
+        await call.answer(f"✅ Успешно экспортировано {count} мерчантов!", show_alert=True)
+    except Exception:
+        pass
+    await cb_settings_menu(call)
