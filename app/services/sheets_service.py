@@ -64,15 +64,21 @@ class GoogleSheetsService:
                 None, lambda: self._client.open_by_key(self.spreadsheet_id)
             )
             
-            # Select the FIRST worksheet tab (sheet1) so rows appear on the main visible sheet tab!
+            # 1. First try tab named 'Merchants'
+            # 2. Otherwise get the very FIRST visible tab by index 0 (regardless of its title)
             try:
                 self._sheet = await loop.run_in_executor(
-                    None, lambda: spreadsheet.sheet1
+                    None, lambda: spreadsheet.worksheet("Merchants")
                 )
             except Exception:
-                self._sheet = await loop.run_in_executor(
-                    None, lambda: spreadsheet.get_worksheet(0)
-                )
+                try:
+                    self._sheet = await loop.run_in_executor(
+                        None, lambda: spreadsheet.get_worksheet(0)
+                    )
+                except Exception:
+                    self._sheet = await loop.run_in_executor(
+                        None, lambda: spreadsheet.sheet1
+                    )
 
             # Ensure headers exist on row 1 if sheet is empty
             rows_count = await loop.run_in_executor(None, lambda: len(self._sheet.get_all_values()))
@@ -80,7 +86,7 @@ class GoogleSheetsService:
                 headers = ["UserNo", "Nickname", "Type", "Month Orders", "Finish Rate", "Contacts", "Remarks", "First Seen", "Last Seen"]
                 await loop.run_in_executor(None, lambda: self._sheet.append_row(headers))
 
-            logger.info(f"Successfully connected to Google Sheets main sheet1 ID: {self.spreadsheet_id}")
+            logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id} (Worksheet: {self._sheet.title})")
             return True, "OK"
         except ModuleNotFoundError:
             return False, "⚠️ Пакет gspread не установлен. Выполните: pip install gspread google-auth"
@@ -129,7 +135,7 @@ class GoogleSheetsService:
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
-            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets (sheet1).")
+            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets ({self._sheet.title}).")
         except Exception as e:
             logger.error(f"Error batch appending rows to Google Sheets: {e}")
             if "429" in str(e):
