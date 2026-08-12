@@ -12,7 +12,7 @@ from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyb
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
-from app.services.sheets_service import GoogleSheetsService
+from app.services.sheets_service import GoogleSheetsService, DEFAULT_COLUMNS_CONFIG
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -23,6 +23,10 @@ class QuietHoursForm(StatesGroup):
 class GoogleSheetsForm(StatesGroup):
     sheet_id = State()
     service_account_file = State()
+
+class ColumnRenameForm(StatesGroup):
+    col_key = State()
+    new_title = State()
 
 async def get_setting(key: str, default: str = "") -> str:
     async with AsyncSessionLocal() as session:
@@ -162,6 +166,7 @@ async def cb_google_sheets_menu(call: CallbackQuery):
             InlineKeyboardButton(text=btn_filter, callback_data="toggle_sheets_auto_contacts_only"),
         ],
         [
+            InlineKeyboardButton(text="📐 Настройка Колонок Таблицы", callback_data="menu_sheets_columns"),
             InlineKeyboardButton(text="📥 Запустить Ручной Экспорт", callback_data="run_google_sheets_export_prompt"),
         ],
         [
@@ -170,6 +175,190 @@ async def cb_google_sheets_menu(call: CallbackQuery):
     ]
 
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+# --- COLUMN MANAGEMENT SUBMENU ---
+
+@router.callback_query(F.data == "menu_sheets_columns")
+async def cb_sheets_columns_menu(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    text = "📐 <b>НАСТРОЙКА КОЛОНОК GOOGLE ТАБЛИЦЫ</b>\n\nПорядок и отображение столбцов:\n\n"
+    buttons = []
+
+    for idx, c in enumerate(config, 1):
+        status_icon = "🟢" if c.get("enabled", True) else "🔴"
+        title = c.get("title", c["key"])
+        text += f"<b>{idx}.</b> {status_icon} <b>{title}</b> (<code>{c['key']}</code>)\n"
+        
+        btn_text = f"{idx}. {status_icon} {title}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"col_card_{c['key']}")])
+
+    buttons.append([InlineKeyboardButton(text="🔄 Сбросить Порядок и Названия", callback_data="col_reset_default")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в Google Sheets", callback_data="menu_google_sheets")])
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("col_card_"))
+async def cb_col_card(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    key = call.data.replace("col_card_", "")
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    col = None
+    idx = -1
+    for i, c in enumerate(config):
+        if c["key"] == key:
+            col = c
+            idx = i
+            break
+
+    if not col:
+        await call.answer("Колонка не найдена", show_alert=True)
+        return
+
+    is_enabled = col.get("enabled", True)
+    status_str = "🟢 Включена" if is_enabled else "🔴 Выключена (Скрыта)"
+    title = col.get("title", key)
+    total_cols = len(config)
+
+    text = (
+        f"⚙️ <b>НАСТРОЙКА КОЛОНКИ: {title}</b>\n\n"
+        f"🔑 <b>Ключ:</b> <code>{key}</code>\n"
+        f"📝 <b>Заголовок:</b> {title}\n"
+        f"📊 <b>Статус:</b> {status_str}\n"
+        f"🔢 <b>Порядок (Позиция):</b> {idx + 1} из {total_cols}\n"
+    )
+
+    btn_toggle = "🔴 Выключить (Скрыть)" if is_enabled else "🟢 Включить (Показать)"
+
+    buttons = [
+        [InlineKeyboardButton(text=btn_toggle, callback_data=f"col_toggle_{key}")],
+        [InlineKeyboardButton(text="✏️ Переименовать Заголовок", callback_data=f"col_rename_{key}")],
+    ]
+
+    move_row = []
+    if idx > 0:
+        move_row.append(InlineKeyboardButton(text="⬆️ Влево (Выше)", callback_data=f"col_move_up_{key}"))
+    if idx < total_cols - 1:
+        move_row.append(InlineKeyboardButton(text="⬇️ Вправо (Ниже)", callback_data=f"col_move_down_{key}"))
+    if move_row:
+        buttons.append(move_row)
+
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад к Колонкам", callback_data="menu_sheets_columns")])
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("col_toggle_"))
+async def cb_col_toggle(call: CallbackQuery):
+    key = call.data.replace("col_toggle_", "")
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    for c in config:
+        if c["key"] == key:
+            c["enabled"] = not c.get("enabled", True)
+            break
+
+    await sheets_service.save_columns_config(config)
+    try:
+        await call.answer("Статус колонки изменен!", show_alert=True)
+    except Exception:
+        pass
+    await cb_col_card(call)
+
+@router.callback_query(F.data.startswith("col_move_up_"))
+async def cb_col_move_up(call: CallbackQuery):
+    key = call.data.replace("col_move_up_", "")
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    for i in range(len(config)):
+        if config[i]["key"] == key and i > 0:
+            config[i], config[i-1] = config[i-1], config[i]
+            break
+
+    await sheets_service.save_columns_config(config)
+    try:
+        await call.answer("Позиция сдвинута влево!", show_alert=True)
+    except Exception:
+        pass
+    await cb_col_card(call)
+
+@router.callback_query(F.data.startswith("col_move_down_"))
+async def cb_col_move_down(call: CallbackQuery):
+    key = call.data.replace("col_move_down_", "")
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    for i in range(len(config)):
+        if config[i]["key"] == key and i < len(config) - 1:
+            config[i], config[i+1] = config[i+1], config[i]
+            break
+
+    await sheets_service.save_columns_config(config)
+    try:
+        await call.answer("Позиция сдвинута вправо!", show_alert=True)
+    except Exception:
+        pass
+    await cb_col_card(call)
+
+@router.callback_query(F.data.startswith("col_rename_"))
+async def cb_col_rename_start(call: CallbackQuery, state: FSMContext):
+    key = call.data.replace("col_rename_", "")
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    await state.set_state(ColumnRenameForm.new_title)
+    await state.update_data(col_key=key)
+
+    text = (
+        f"✏️ <b>ПЕРЕИМЕНОВАНИЕ ЗАГОЛОВКА КОЛОНКИ (`{key}`)</b>\n\n"
+        "Отправьте новое название для этой колонки:"
+    )
+    await call.message.edit_text(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+
+@router.message(ColumnRenameForm.new_title)
+async def process_col_rename_input(message: Message, state: FSMContext):
+    data = await state.get_data()
+    key = data.get("col_key")
+    new_title = message.text.strip()
+    await state.clear()
+
+    sheets_service = GoogleSheetsService()
+    config = await sheets_service.get_columns_config()
+
+    for c in config:
+        if c["key"] == key:
+            c["title"] = new_title
+            break
+
+    await sheets_service.save_columns_config(config)
+    await message.answer(f"✅ <b>Заголовок колонки `{key}` изменен на: `{new_title}`</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "col_reset_default")
+async def cb_col_reset(call: CallbackQuery):
+    sheets_service = GoogleSheetsService()
+    await sheets_service.save_columns_config(DEFAULT_COLUMNS_CONFIG)
+    try:
+        await call.answer("Конфигурация колонок сброшена на по умолчанию!", show_alert=True)
+    except Exception:
+        pass
+    await cb_sheets_columns_menu(call)
+
+# --- END COLUMN MANAGEMENT ---
 
 @router.callback_query(F.data == "toggle_sheets_auto_contacts_only")
 async def cb_toggle_sheets_auto_contacts(call: CallbackQuery):
