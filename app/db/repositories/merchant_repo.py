@@ -1,7 +1,8 @@
 import logging
 from datetime import datetime, timezone
+from typing import List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,7 +16,16 @@ class MerchantRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get_by_user_no(self, user_no: str) -> Merchant | None:
+    async def get_by_id(self, merchant_id: int) -> Optional[Merchant]:
+        stmt = (
+            select(Merchant)
+            .where(Merchant.id == merchant_id)
+            .options(selectinload(Merchant.contacts), selectinload(Merchant.advertisements))
+        )
+        res = await self.session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    async def get_by_user_no(self, user_no: str) -> Optional[Merchant]:
         stmt = (
             select(Merchant)
             .where(Merchant.user_no == user_no)
@@ -26,7 +36,7 @@ class MerchantRepository:
 
     async def process_binance_item(
         self, item: BinanceSearchItem
-    ) -> tuple[Merchant, bool, list[Contact], bool]:
+    ) -> Tuple[Merchant, bool, List[Contact], bool]:
         adv_data = item.adv
         advertiser_data = item.advertiser
 
@@ -34,7 +44,7 @@ class MerchantRepository:
         existing_merchant = await self.get_by_user_no(user_no)
 
         is_new_merchant = False
-        new_contacts: list[Contact] = []
+        new_contacts: List[Contact] = []
         now = datetime.now(timezone.utc)
         existing_contacts_map = {}
 
@@ -58,6 +68,7 @@ class MerchantRepository:
         else:
             merchant = existing_merchant
             merchant.nickname = advertiser_data.nickName or merchant.nickname
+            merchant.user_type = advertiser_data.userType or merchant.user_type
             merchant.month_order_count = advertiser_data.monthOrderCount or merchant.month_order_count
             merchant.month_finish_rate = advertiser_data.monthFinishRate or merchant.month_finish_rate
             merchant.positive_rate = advertiser_data.positiveRate or merchant.positive_rate
@@ -71,7 +82,7 @@ class MerchantRepository:
             }
 
         # Extract Contacts from nickname, remarks, autoReplyMsg
-        extracted: list[ExtractedContact] = ContactExtractor.extract_from_merchant_data(
+        extracted: List[ExtractedContact] = ContactExtractor.extract_from_merchant_data(
             nickname=merchant.nickname,
             remarks=adv_data.remarks,
             auto_reply=adv_data.autoReplyMsg,
@@ -137,20 +148,29 @@ class MerchantRepository:
         return merchant, is_new_merchant, new_contacts, is_new_or_updated_ad
 
     async def get_all_merchants(
-        self, limit: int = 50, offset: int = 0, search_query: str | None = None
-    ) -> tuple[list[Merchant], int]:
+        self, limit: int = 50, offset: int = 0, search_query: Optional[str] = None, only_verified: bool = False
+    ) -> Tuple[List[Merchant], int]:
         query = select(Merchant).options(selectinload(Merchant.contacts), selectinload(Merchant.advertisements))
         count_query = select(func.count(Merchant.id))
 
+        filters = []
         if search_query:
             term = f"%{search_query}%"
-            filter_clause = (
+            filters.append(
                 Merchant.nickname.ilike(term)
                 | Merchant.user_no.ilike(term)
                 | Merchant.remarks.ilike(term)
             )
-            query = query.where(filter_clause)
-            count_query = count_query.where(filter_clause)
+
+        if only_verified:
+            filters.append(
+                Merchant.user_type.ilike("%merchant%") | Merchant.user_type.ilike("%pro%")
+            )
+
+        if filters:
+            for f in filters:
+                query = query.where(f)
+                count_query = count_query.where(f)
 
         total_res = await self.session.execute(count_query)
         total_count = total_res.scalar_one()
@@ -160,3 +180,26 @@ class MerchantRepository:
         merchants = list(res.scalars().all())
 
         return merchants, total_count
+
+    async def get_all(self, limit: int = 50, offset: int = 0, only_verified: bool = False) -> List[Merchant]:
+        merchants, _ = await self.get_all_merchants(limit=limit, offset=offset, only_verified=only_verified)
+        return merchants
+
+    async def get_total_count(self, only_verified: bool = False) -> int:
+        count_query = select(func.count(Merchant.id))
+        if only_verified:
+            count_query = count_query.where(Merchant.user_type.ilike("%merchant%") | Merchant.user_type.ilike("%pro%"))
+        res = await self.session.execute(count_query)
+        return res.scalar_one()
+
+    async def delete_merchant(self, merchant_id: int) -> bool:
+        stmt = delete(Merchant).where(Merchant.id == merchant_id)
+        res = await self.session.execute(stmt)
+        await self.session.commit()
+        return res.rowcount > 0
+
+    async def clear_all_merchants(self) -> int:
+        stmt = delete(Merchant)
+        res = await self.session.execute(stmt)
+        await self.session.commit()
+        return res.rowcount

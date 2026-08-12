@@ -8,12 +8,16 @@ from sqlalchemy import select
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
+from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 class QuietHoursForm(StatesGroup):
     hours_range = State()
+
+class GoogleSheetsForm(StatesGroup):
+    sheet_id = State()
 
 async def get_setting(key: str, default: str = "") -> str:
     async with AsyncSessionLocal() as session:
@@ -58,16 +62,21 @@ async def cb_settings_menu(call: CallbackQuery):
     q_start = await get_setting("quiet_hours_start", "23:00")
     q_end = await get_setting("quiet_hours_end", "07:00")
     contact_ext = await get_setting("contact_extraction_enabled", "true")
+    sheet_id = await get_setting("google_spreadsheet_id", "Не задан")
+    sheets_auto = await get_setting("google_sheets_auto_export", "false")
 
-    mon_status = "🟢 Включен (Идет сканирование)" if global_mon.lower() == "true" else "🔴 Выключен (Пауза)"
+    mon_status = "🟢 Включен" if global_mon.lower() == "true" else "🔴 Выключен"
     quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_hours.lower() == "true" else "🔴 Выключено"
     contact_status = "🟢 Включен" if contact_ext.lower() == "true" else "🔴 Выключен"
+    sheets_auto_status = "🟢 Автоматический" if sheets_auto.lower() == "true" else "🔴 Ручной"
 
     text = (
         "⚙️ <b>ГЛОБАЛЬНЫЕ НАСТРОЙКИ СИСТЕМЫ</b>\n\n"
         f"⏯ <b>Автоматический Мониторинг:</b> {mon_status}\n"
         f"🌙 <b>Тихое Время (Quiet Hours):</b> {quiet_status}\n"
-        f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n"
+        f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n\n"
+        f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
+        f"🔄 <b>Режим Экспорта Таблицы:</b> {sheets_auto_status}\n"
     )
 
     buttons = [
@@ -76,10 +85,15 @@ async def cb_settings_menu(call: CallbackQuery):
             InlineKeyboardButton(text="🌙 Вкл/Выкл Тихое Время", callback_data="toggle_quiet_hours"),
         ],
         [
-            InlineKeyboardButton(text="⏰ Изменить Интервал Тихого Времени", callback_data="set_quiet_hours_time"),
+            InlineKeyboardButton(text="⏰ Интервал Тихого Времени", callback_data="set_quiet_hours_time"),
+            InlineKeyboardButton(text="🔍 Вкл/Выкл Контакты", callback_data="toggle_contact_extraction"),
         ],
         [
-            InlineKeyboardButton(text="🔍 Вкл/Выкл Парсинг Контактов", callback_data="toggle_contact_extraction"),
+            InlineKeyboardButton(text="📊 Ссылка/ID Google Таблицы", callback_data="set_google_sheet_id"),
+            InlineKeyboardButton(text="🔄 Авто/Ручной Экспорт", callback_data="toggle_sheets_auto"),
+        ],
+        [
+            InlineKeyboardButton(text="📥 Запустить Экспорт в Google Таблицу", callback_data="run_google_sheets_export"),
         ],
         [
             InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main"),
@@ -102,31 +116,54 @@ async def cb_toggle_contacts(call: CallbackQuery):
     await set_setting("contact_extraction_enabled", new_val)
     await cb_settings_menu(call)
 
-@router.callback_query(F.data == "set_quiet_hours_time")
-async def cb_set_quiet_time(call: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "toggle_sheets_auto")
+async def cb_toggle_sheets_auto(call: CallbackQuery):
+    current = await get_setting("google_sheets_auto_export", "false")
+    new_val = "false" if current.lower() == "true" else "true"
+    await set_setting("google_sheets_auto_export", new_val)
+    await cb_settings_menu(call)
+
+@router.callback_query(F.data == "set_google_sheet_id")
+async def cb_set_google_sheet(call: CallbackQuery, state: FSMContext):
     try:
         await call.answer()
     except Exception:
         pass
-    await state.set_state(QuietHoursForm.hours_range)
+    await state.set_state(GoogleSheetsForm.sheet_id)
     text = (
-        "⏰ <b>НАСТРОЙКА ИНТЕРВАЛА ТИХОГО ВРЕМЕНИ</b>\n\n"
-        "Введите время начала и окончания в формате `ЧЧ:ММ-ЧЧ:ММ` (например: <code>23:00-07:00</code>):"
+        "📊 <b>НАСТРОЙКА GOOGLE ТАБЛИЦЫ</b>\n\n"
+        "Отправьте ссылку на Google Таблицу или её ID (например: `1BxiMVs0XRra5nFMdKbB...`):"
     )
     await call.message.edit_text(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
 
-@router.message(QuietHoursForm.hours_range)
-async def process_quiet_hours_input(message: Message, state: FSMContext):
-    text = message.text.strip()
+@router.message(GoogleSheetsForm.sheet_id)
+async def process_google_sheet_input(message: Message, state: FSMContext):
+    raw_input = message.text.strip()
     await state.clear()
 
-    if "-" in text:
-        parts = text.split("-")
-        if len(parts) == 2:
-            st, end = parts[0].strip(), parts[1].strip()
-            await set_setting("quiet_hours_start", st)
-            await set_setting("quiet_hours_end", end)
-            await message.answer(f"✅ <b>Интервал тихого времени установлен: `{st}` — `{end}`</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
-            return
+    # Extract ID if full URL provided
+    sheet_id = raw_input
+    if "docs.google.com/spreadsheets/d/" in raw_input:
+        sheet_id = raw_input.split("/d/")[1].split("/")[0]
 
-    await message.answer("⚠️ Неверный формат. Используйте формат `23:00-07:00`.", reply_markup=get_back_menu_keyboard())
+    await set_setting("google_spreadsheet_id", sheet_id)
+    await message.answer(f"✅ <b>Google Spreadsheet ID сохранен: `{sheet_id}`</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+
+@router.callback_query(F.data == "run_google_sheets_export")
+async def cb_run_sheets_export(call: CallbackQuery):
+    sheet_id = await get_setting("google_spreadsheet_id")
+    if not sheet_id:
+        try:
+            await call.answer("⚠️ Google Spreadsheet ID не настроен!", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    try:
+        await call.answer("📊 Выполняется экспорт данных в Google Таблицу...", show_alert=True)
+    except Exception:
+        pass
+
+    sheets_service = GoogleSheetsService()
+    await sheets_service.initialize()
+    # Trigger export
