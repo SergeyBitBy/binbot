@@ -11,7 +11,6 @@ from sqlalchemy import select
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
-from app.db.repositories.merchant_repo import MerchantRepository
 from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,7 @@ async def set_setting(key: str, value: str):
                 await session.commit()
                 return
         except Exception as e:
-            logger.warning(f"set_setting failed attempt {attempt+1}/5: {e}")
+            logger.debug(f"set_setting retry attempt {attempt+1}/5: {e}")
             await asyncio.sleep(0.5 * (attempt + 1))
 
 @router.callback_query(F.data == "toggle_global_monitoring")
@@ -89,10 +88,15 @@ async def cb_settings_menu(call: CallbackQuery):
     else:
         json_status = "🔴 Файл отсутствует"
 
-    mon_status = "🟢 Включен" if global_mon.lower() == "true" else "🔴 Выключен"
-    quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_hours.lower() == "true" else "🔴 Выключено"
-    contact_status = "🟢 Включен" if contact_ext.lower() == "true" else "🔴 Выключен"
-    sheets_auto_status = "🟢 Автоматический" if sheets_auto.lower() == "true" else "🔴 Ручной"
+    mon_is_on = global_mon.lower() == "true"
+    quiet_is_on = quiet_hours.lower() == "true"
+    contact_is_on = contact_ext.lower() == "true"
+    sheets_auto_is_on = sheets_auto.lower() == "true"
+
+    mon_status = "🟢 Включен" if mon_is_on else "🔴 Выключен"
+    quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_is_on else "🔴 Выключено"
+    contact_status = "🟢 Включен" if contact_is_on else "🔴 Выключен"
+    sheets_auto_status = "🟢 Автоматический" if sheets_auto_is_on else "🔴 Ручной"
 
     text = (
         "⚙️ <b>ГЛОБАЛЬНЫЕ НАСТРОЙКИ СИСТЕМЫ</b>\n\n"
@@ -104,21 +108,26 @@ async def cb_settings_menu(call: CallbackQuery):
         f"🔄 <b>Режим Экспорта Таблицы:</b> {sheets_auto_status}\n"
     )
 
+    btn_mon = "⏯ Анализ: 🟢 ВКЛ" if mon_is_on else "⏯ Анализ: 🔴 ВЫКЛ"
+    btn_quiet = "🌙 Тихое Время: 🟢 ВКЛ" if quiet_is_on else "🌙 Тихое Время: 🔴 ВЫКЛ"
+    btn_contacts = "🔍 Контакты: 🟢 ВКЛ" if contact_is_on else "🔍 Контакты: 🔴 ВЫКЛ"
+    btn_sheets_auto = "🔄 Экспорт: 🟢 АВТО" if sheets_auto_is_on else "🔄 Экспорт: 🔴 РУЧНОЙ"
+
     buttons = [
         [
-            InlineKeyboardButton(text="⏯ Вкл/Выкл Анализ", callback_data="toggle_global_monitoring"),
-            InlineKeyboardButton(text="🌙 Вкл/Выкл Тихое Время", callback_data="toggle_quiet_hours"),
+            InlineKeyboardButton(text=btn_mon, callback_data="toggle_global_monitoring"),
+            InlineKeyboardButton(text=btn_quiet, callback_data="toggle_quiet_hours"),
         ],
         [
             InlineKeyboardButton(text="⏰ Интервал Тихого Времени", callback_data="set_quiet_hours_time"),
-            InlineKeyboardButton(text="🔍 Вкл/Выкл Контакты", callback_data="toggle_contact_extraction"),
+            InlineKeyboardButton(text=btn_contacts, callback_data="toggle_contact_extraction"),
         ],
         [
             InlineKeyboardButton(text="📊 Ссылка/ID Google Таблицы", callback_data="set_google_sheet_id"),
             InlineKeyboardButton(text="📄 Загрузить service_account.json", callback_data="upload_service_account"),
         ],
         [
-            InlineKeyboardButton(text="🔄 Авто/Ручной Экспорт", callback_data="toggle_sheets_auto"),
+            InlineKeyboardButton(text=btn_sheets_auto, callback_data="toggle_sheets_auto"),
             InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="run_google_sheets_export_prompt"),
         ],
         [
@@ -127,6 +136,20 @@ async def cb_settings_menu(call: CallbackQuery):
     ]
 
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "toggle_sheets_auto")
+async def cb_toggle_sheets_auto(call: CallbackQuery):
+    current = await get_setting("google_sheets_auto_export", "false")
+    new_val = "false" if current.lower() == "true" else "true"
+    await set_setting("google_sheets_auto_export", new_val)
+
+    status_msg = "🟢 Режим экспорта: АВТОМАТИЧЕСКИЙ" if new_val == "true" else "🔴 Режим экспорта: РУЧНОЙ"
+    try:
+        await call.answer(status_msg, show_alert=True)
+    except Exception:
+        pass
+
+    await cb_settings_menu(call)
 
 @router.callback_query(F.data == "upload_service_account")
 async def cb_upload_service_account_start(call: CallbackQuery, state: FSMContext):
@@ -190,13 +213,6 @@ async def cb_toggle_contacts(call: CallbackQuery):
     current = await get_setting("contact_extraction_enabled", "true")
     new_val = "false" if current.lower() == "true" else "true"
     await set_setting("contact_extraction_enabled", new_val)
-    await cb_settings_menu(call)
-
-@router.callback_query(F.data == "toggle_sheets_auto")
-async def cb_toggle_sheets_auto(call: CallbackQuery):
-    current = await get_setting("google_sheets_auto_export", "false")
-    new_val = "false" if current.lower() == "true" else "true"
-    await set_setting("google_sheets_auto_export", new_val)
     await cb_settings_menu(call)
 
 @router.callback_query(F.data == "set_google_sheet_id")
