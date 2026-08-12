@@ -145,24 +145,22 @@ async def cb_merch_export_do(call: CallbackQuery):
     target = call.data.replace("merch_export_sheets_", "")
     only_contacts = (target == "contacts")
 
-    await safe_answer(call, "📊 Запущен экспорт в Google Таблицу...", show_alert=True)
+    await safe_answer(call, "📊 Запущен пакетный экспорт в Google Таблицу...", show_alert=True)
 
     sheets_service = GoogleSheetsService()
-    await sheets_service.initialize()
-    if not sheets_service.is_configured():
-        await safe_answer(call, "⚠️ Google Spreadsheet ID не настроен в Глобальных Настройках!", show_alert=True)
+    success, err_msg = await sheets_service.initialize_with_status()
+    if not success:
+        await safe_answer(call, err_msg, show_alert=True)
         return
 
     async with AsyncSessionLocal() as session:
         repo = MerchantRepository(session)
         merchants, _ = await repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
 
-    count = 0
-    for m in merchants:
-        await sheets_service.sync_merchant(m, m.contacts)
-        count += 1
+    pairs = [(m, m.contacts) for m in merchants]
+    await sheets_service.sync_merchants_batch(pairs)
 
-    await safe_answer(call, f"✅ Экспорт завершен! Экспортировано {count} мерчантов.", show_alert=True)
+    await safe_answer(call, f"✅ Экспорт завершен! Экспортировано {len(pairs)} мерчантов 1 запросом.", show_alert=True)
     await cb_merchants_page(call, page=1)
 
 @router.callback_query(F.data.startswith("merch_card_"))

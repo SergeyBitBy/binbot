@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from sqlalchemy import select
 
 from app.config.settings import settings
@@ -93,24 +93,38 @@ class GoogleSheetsService:
         return self._sheet is not None
 
     async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
-        if not self._sheet:
+        await self.sync_merchants_batch([(merchant, contacts)])
+
+    async def sync_merchants_batch(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
+        if not self._sheet or not merchant_contacts_list:
             return
 
-        contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
-        row = [
-            merchant.user_no,
-            merchant.nickname or "",
-            merchant.user_type or "",
-            merchant.month_order_count,
-            f"{merchant.month_finish_rate * 100:.1f}%",
-            contacts_str,
-            (merchant.remarks or "")[:300],
-            merchant.first_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.first_seen_at else "",
-            merchant.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.last_seen_at else "",
-        ]
+        rows = []
+        for merchant, contacts in merchant_contacts_list:
+            contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
+            row = [
+                merchant.user_no,
+                merchant.nickname or "",
+                merchant.user_type or "",
+                merchant.month_order_count,
+                f"{merchant.month_finish_rate * 100:.1f}%",
+                contacts_str,
+                (merchant.remarks or "")[:300],
+                merchant.first_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.first_seen_at else "",
+                merchant.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.last_seen_at else "",
+            ]
+            rows.append(row)
 
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: self._sheet.append_row(row))
+            await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
+            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
         except Exception as e:
-            logger.error(f"Error appending row to Google Sheets: {e}")
+            logger.error(f"Error batch appending rows to Google Sheets: {e}")
+            # Fallback with delay if rate limited
+            if "429" in str(e):
+                await asyncio.sleep(2.0)
+                try:
+                    await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
+                except Exception as retry_e:
+                    logger.error(f"Retry batch append failed: {retry_e}")
