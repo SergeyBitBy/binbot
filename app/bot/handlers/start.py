@@ -1,6 +1,5 @@
 import logging
-
-from aiogram import F, Router
+from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -12,6 +11,8 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
+    user = message.from_user
+    logger.info(f"Received /start command from user_id={user.id if user else 'None'}, username={user.username if user else 'None'}")
     text = (
         "🤖 <b>Binance P2P Monitor Bot v1.0</b>\n\n"
         "Добро пожаловать в административную панель автоматического мониторинга Binance P2P.\n\n"

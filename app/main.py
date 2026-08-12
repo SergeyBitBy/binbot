@@ -1,15 +1,14 @@
 import asyncio
 import logging
 import sys
-
-from aiogram import Bot, Dispatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram import Bot, Dispatcher
 
-from app.bot.handlers import backup, dashboard, logs, merchants, profiles, start
-from app.bot.middlewares.auth_middleware import AuthMiddleware
 from app.config.logging import setup_logging
 from app.config.settings import settings
 from app.db.database import init_db
+from app.bot.middlewares.auth_middleware import AuthMiddleware
+from app.bot.handlers import backup, dashboard, logs, merchants, profiles, start
 from app.services.monitoring_service import MonitoringService
 from app.services.notification_service import NotificationService
 from app.services.sheets_service import GoogleSheetsService
@@ -18,9 +17,10 @@ logger = logging.getLogger(__name__)
 
 async def main():
     setup_logging()
+    logger.info("==========================================")
     logger.info("Starting Binance P2P Monitor Bot...")
 
-    # 1. Initialize Database & Seed Defaults (Section 139)
+    # 1. Initialize Database & Seed Defaults
     await init_db()
     logger.info("Database initialized successfully.")
 
@@ -37,6 +37,9 @@ async def main():
     # 3. Setup Telegram Bot & Dispatcher
     bot = Bot(token=settings.bot_token)
     notification_service.set_bot(bot)
+
+    bot_info = await bot.get_me()
+    logger.info(f"Connected to Telegram as @{bot_info.username} (ID: {bot_info.id})")
 
     dp = Dispatcher()
     dp.message.outer_middleware(AuthMiddleware())
@@ -66,7 +69,7 @@ async def main():
     asyncio.create_task(monitoring_service.scan_all_active_profiles())
 
     try:
-        logger.info("Bot starting polling mode...")
+        logger.info(f"Bot @{bot_info.username} is now POLLING for incoming messages...")
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
