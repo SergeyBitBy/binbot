@@ -109,6 +109,10 @@ class MonitoringService:
 
                     merchant, is_new_m, new_c, is_new_ad = await merchant_repo.process_binance_item(item)
 
+                    # Strict profile filter: if merchant_check is True, skip non-merchant users!
+                    if profile.merchant_check and (not merchant.user_type or "merchant" not in merchant.user_type.lower()):
+                        continue
+
                     if is_new_m:
                         new_merchants_count += 1
                     if new_c:

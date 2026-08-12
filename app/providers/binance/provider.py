@@ -43,6 +43,7 @@ class BinanceP2PProvider(BaseP2PProvider):
                 payTypes=pay_types or [],
                 transAmount=trans_amount,
                 merchantCheck=merchant_check,
+                publisherType="merchant" if merchant_check else None,
                 page=page,
                 rows=rows_per_page,
             )
