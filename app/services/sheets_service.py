@@ -139,7 +139,7 @@ class GoogleSheetsService:
             await loop.run_in_executor(
                 None,
                 lambda: self._sheet.format(
-                    f"A2:I{end_row}",
+                    f"A1:I{end_row}",
                     {
                         "horizontalAlignment": "CENTER",
                         "verticalAlignment": "MIDDLE",
@@ -148,6 +148,23 @@ class GoogleSheetsService:
             )
         except Exception as e:
             logger.warning(f"Failed to apply formatting to Google Sheets: {e}")
+
+    async def ensure_headers_exist(self):
+        """Ensure row 1 contains HEADERS. If row 1 is empty or contains merchant data, insert HEADERS at top."""
+        if not self._sheet:
+            return
+
+        loop = asyncio.get_event_loop()
+        try:
+            all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
+            if not all_vals:
+                await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=[HEADERS]))
+            elif all_vals[0] != HEADERS:
+                # If first row is merchant data (not header title), insert HEADERS at top
+                if all_vals[0][0] != HEADERS[0]:
+                    await loop.run_in_executor(None, lambda: self._sheet.insert_row(HEADERS, 1))
+        except Exception as e:
+            logger.error(f"Error ensuring headers in Google Sheets: {e}")
 
     async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
         """Clean sheet completely, write headers at A1, write data starting at A2, and center-align all cells."""
@@ -194,6 +211,9 @@ class GoogleSheetsService:
         if not self._sheet or not merchant_contacts_list:
             return
 
+        # Always ensure row 1 has headers!
+        await self.ensure_headers_exist()
+
         rows = []
         for merchant, contacts in merchant_contacts_list:
             contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
@@ -212,9 +232,13 @@ class GoogleSheetsService:
             ]
             rows.append(row)
 
+        loop = asyncio.get_event_loop()
         try:
-            loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
             logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
+            
+            # Format and center all rows!
+            all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
+            await self._apply_formatting(total_rows=len(all_vals))
         except Exception as e:
             logger.error(f"Error batch appending rows to Google Sheets: {e}")
