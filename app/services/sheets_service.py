@@ -10,6 +10,18 @@ from app.db.models import Contact, Merchant, SystemSetting
 
 logger = logging.getLogger(__name__)
 
+HEADERS = [
+    "UserNo",
+    "Никнейм",
+    "Статус",
+    "Ордеров/Месяц",
+    "Выполнение %",
+    "Извлеченные Контакты",
+    "Описание / Условия",
+    "Впервые Замечен",
+    "Последняя Активность",
+]
+
 class GoogleSheetsService:
     def __init__(self):
         self.credentials_path = None
@@ -64,8 +76,7 @@ class GoogleSheetsService:
                 None, lambda: self._client.open_by_key(self.spreadsheet_id)
             )
             
-            # 1. First try tab named 'Merchants'
-            # 2. Otherwise get the very FIRST visible tab by index 0 (regardless of its title)
+            # Select 'Merchants' or default to index 0 (main sheet)
             try:
                 self._sheet = await loop.run_in_executor(
                     None, lambda: spreadsheet.worksheet("Merchants")
@@ -79,12 +90,6 @@ class GoogleSheetsService:
                     self._sheet = await loop.run_in_executor(
                         None, lambda: spreadsheet.sheet1
                     )
-
-            # Ensure headers exist on row 1 if sheet is empty
-            rows_count = await loop.run_in_executor(None, lambda: len(self._sheet.get_all_values()))
-            if rows_count == 0:
-                headers = ["UserNo", "Nickname", "Type", "Month Orders", "Finish Rate", "Contacts", "Remarks", "First Seen", "Last Seen"]
-                await loop.run_in_executor(None, lambda: self._sheet.append_row(headers))
 
             logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id} (Worksheet: {self._sheet.title})")
             return True, "OK"
@@ -108,6 +113,79 @@ class GoogleSheetsService:
     def is_configured(self) -> bool:
         return self._sheet is not None
 
+    async def _apply_formatting(self, total_rows: int):
+        """Apply bold headers, background color, and center alignment across all cells."""
+        if not self._sheet:
+            return
+
+        loop = asyncio.get_event_loop()
+        try:
+            # 1. Format Header Row (A1:I1)
+            await loop.run_in_executor(
+                None,
+                lambda: self._sheet.format(
+                    "A1:I1",
+                    {
+                        "textFormat": {"bold": True, "fontSize": 10},
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "backgroundColorStyle": {"rgbColor": {"red": 0.88, "green": 0.92, "blue": 0.98}},
+                    },
+                ),
+            )
+
+            # 2. Format Data Rows (A2:I{total_rows+1}) - Center Alignment
+            end_row = max(2, total_rows + 1)
+            await loop.run_in_executor(
+                None,
+                lambda: self._sheet.format(
+                    f"A2:I{end_row}",
+                    {
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                    },
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to apply formatting to Google Sheets: {e}")
+
+    async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
+        """Clean sheet completely, write headers at A1, write data starting at A2, and center-align all cells."""
+        if not self._sheet:
+            return
+
+        rows = [HEADERS]
+        for merchant, contacts in merchant_contacts_list:
+            contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
+            user_badge = "Проверенный" if merchant.user_type and "merchant" in merchant.user_type.lower() else "Пользователь"
+            
+            row = [
+                merchant.user_no,
+                merchant.nickname or "",
+                user_badge,
+                merchant.month_order_count,
+                f"{merchant.month_finish_rate * 100:.1f}%",
+                contacts_str,
+                (merchant.remarks or "").replace("\n", " ")[:300],
+                merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
+                merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
+            ]
+            rows.append(row)
+
+        loop = asyncio.get_event_loop()
+        try:
+            # Clear sheet completely to remove misplaced old columns and rows
+            await loop.run_in_executor(None, lambda: self._sheet.clear())
+
+            # Update sheet starting at A1 in a single batch call
+            await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=rows))
+            logger.info(f"Successfully overwrote Google Sheets with {len(rows)-1} merchant rows starting at A1.")
+
+            # Apply Center Alignment and Bold Header Formatting
+            await self._apply_formatting(total_rows=len(rows))
+        except Exception as e:
+            logger.error(f"Error overwriting Google Sheets: {e}")
+
     async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
         if await self.is_auto_export_enabled():
             await self.sync_merchants_batch([(merchant, contacts)])
@@ -119,28 +197,24 @@ class GoogleSheetsService:
         rows = []
         for merchant, contacts in merchant_contacts_list:
             contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
+            user_badge = "Проверенный" if merchant.user_type and "merchant" in merchant.user_type.lower() else "Пользователь"
+            
             row = [
                 merchant.user_no,
                 merchant.nickname or "",
-                merchant.user_type or "",
+                user_badge,
                 merchant.month_order_count,
                 f"{merchant.month_finish_rate * 100:.1f}%",
                 contacts_str,
-                (merchant.remarks or "")[:300],
-                merchant.first_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.first_seen_at else "",
-                merchant.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.last_seen_at else "",
+                (merchant.remarks or "").replace("\n", " ")[:300],
+                merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
+                merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
             ]
             rows.append(row)
 
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
-            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets ({self._sheet.title}).")
+            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
         except Exception as e:
             logger.error(f"Error batch appending rows to Google Sheets: {e}")
-            if "429" in str(e):
-                await asyncio.sleep(2.0)
-                try:
-                    await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
-                except Exception as retry_e:
-                    logger.error(f"Retry batch append failed: {retry_e}")

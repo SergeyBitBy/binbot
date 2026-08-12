@@ -134,7 +134,7 @@ async def cb_merch_export_prompt(call: CallbackQuery):
     await safe_answer(call)
     text = "📊 <b>ЭКСПОРТ ДАННЫХ В GOOGLE SHEETS</b>\n\nВыберите вариант экспорта:"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Экспортировать всех (Обновить таблицу)", callback_data="merch_export_sheets_all")],
+        [InlineKeyboardButton(text="📊 Экспортировать всех (Перезаписать таблицу)", callback_data="merch_export_sheets_all")],
         [InlineKeyboardButton(text="📞 Экспортировать только с контактами", callback_data="merch_export_sheets_contacts")],
         [InlineKeyboardButton(text="⬅️ Назад в Базу", callback_data="menu_merchants")],
     ])
@@ -145,7 +145,7 @@ async def cb_merch_export_do(call: CallbackQuery):
     target = call.data.replace("merch_export_sheets_", "")
     only_contacts = (target == "contacts")
 
-    await safe_answer(call, "📊 Запущен пакетный экспорт в Google Таблицу...", show_alert=True)
+    await safe_answer(call, "📊 Очистка и экспорт в Google Таблицу...", show_alert=True)
 
     sheets_service = GoogleSheetsService()
     success, err_msg = await sheets_service.initialize_with_status()
@@ -155,12 +155,12 @@ async def cb_merch_export_do(call: CallbackQuery):
 
     async with AsyncSessionLocal() as session:
         repo = MerchantRepository(session)
-        merchants, _ = await repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
+        merchants, _ = await repo.get_all_merchants(limit=2000, only_with_contacts=only_contacts)
 
     pairs = [(m, m.contacts) for m in merchants]
-    await sheets_service.sync_merchants_batch(pairs)
+    await sheets_service.overwrite_all_merchants(pairs)
 
-    await safe_answer(call, f"✅ Экспорт завершен! Экспортировано {len(pairs)} мерчантов 1 запросом.", show_alert=True)
+    await safe_answer(call, f"✅ Таблица обновлена! Оформлено {len(pairs)} мерчантов с выравниванием по центру.", show_alert=True)
     await cb_merchants_page(call, page=1)
 
 @router.callback_query(F.data.startswith("merch_card_"))
