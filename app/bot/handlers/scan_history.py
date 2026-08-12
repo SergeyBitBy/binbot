@@ -1,4 +1,5 @@
 import logging
+from datetime import timezone, timedelta
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
@@ -9,6 +10,8 @@ from app.db.models import MonitoringProfile, ScanHistory
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+KYIV_TZ = timezone(timedelta(hours=3))
 
 @router.callback_query(F.data == "menu_scan_history")
 async def cb_scan_history(call: CallbackQuery):
@@ -28,13 +31,19 @@ async def cb_scan_history(call: CallbackQuery):
         profiles_res = await session.execute(select(MonitoringProfile))
         profiles_map = {p.id: p.name for p in profiles_res.scalars().all()}
 
-    text = "📜 <b>ИСТОРИЯ ПОСЛЕДНИХ 10 СКАННРОВАНИЙ</b>\n\n"
+    text = "📜 <b>ИСТОРИЯ ПОСЛЕДНИХ 10 СКАНИРОВАНИЙ</b>\n\n"
     if not scans:
         text += "<i>История сканирований пока пуста.</i>"
     else:
         for s in scans:
             p_name = profiles_map.get(s.profile_id, f"Профиль #{s.profile_id}")
-            time_str = s.started_at.strftime("%H:%M:%S (%d.%m)") if s.started_at else "N/A"
+            if s.started_at:
+                st = s.started_at.replace(tzinfo=timezone.utc) if s.started_at.tzinfo is None else s.started_at
+                kyiv_time = st.astimezone(KYIV_TZ)
+                time_str = kyiv_time.strftime("%H:%M:%S (%d.%m)")
+            else:
+                time_str = "N/A"
+
             status_icon = "🟢" if s.status == "SUCCESS" else "🔴"
             text += (
                 f"{status_icon} <b>{p_name}</b> [{time_str}]\n"
