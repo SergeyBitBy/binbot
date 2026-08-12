@@ -82,9 +82,9 @@ class NotificationService:
         
         # Contacts List formatting
         if contacts:
-            contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code> (источник: {getattr(c, 'raw_match', 'описание')})" for c in contacts])
+            contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code>" for c in contacts])
         else:
-            contacts_str = "<i>⚠️ Контакты не найдены в описании объявления/никнейме</i>"
+            contacts_str = "<i>⚠️ Контакты не указаны в описании/никнейме</i>"
 
         # Pay Methods formatting
         pay_str = ", ".join(pay_methods) if pay_methods else "Все способы оплаты"
@@ -111,7 +111,7 @@ class NotificationService:
             clean_remarks = effective_remarks.strip()[:600].replace("<", "&lt;").replace(">", "&gt;")
             text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>«{clean_remarks}»</i>\n"
         else:
-            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>(Описание отсутствует в поисковой выдаче Binance)</i>\n"
+            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>(Не заполнены мерчантом на Binance P2P)</i>\n"
 
         effective_auto_reply = auto_reply or merchant.auto_reply_msg
         if effective_auto_reply and effective_auto_reply.strip():
