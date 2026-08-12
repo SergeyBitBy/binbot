@@ -1,10 +1,15 @@
 import asyncio
+import sys
+from pathlib import Path
 from logging.config import fileConfig
 
-from alembic import context
+# Ensure project root is in sys.path for Alembic
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
+from alembic import context
 
 from app.config.settings import settings
 from app.db.models import Base
