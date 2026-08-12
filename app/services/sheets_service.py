@@ -37,6 +37,12 @@ class GoogleSheetsService:
                 return setting.value.strip()
         return settings.google_spreadsheet_id or ""
 
+    async def is_auto_export_enabled(self) -> bool:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(SystemSetting).where(SystemSetting.key == "google_sheets_auto_export"))
+            setting = res.scalar_one_or_none()
+            return setting is not None and setting.value.lower() == "true"
+
     async def initialize_with_status(self) -> Tuple[bool, str]:
         self.credentials_path = self._find_credentials_file()
         self.spreadsheet_id = await self.get_effective_spreadsheet_id()
@@ -58,19 +64,23 @@ class GoogleSheetsService:
                 None, lambda: self._client.open_by_key(self.spreadsheet_id)
             )
             
-            # Select or create worksheet
+            # Select the FIRST worksheet tab (sheet1) so rows appear on the main visible sheet tab!
             try:
                 self._sheet = await loop.run_in_executor(
-                    None, lambda: spreadsheet.worksheet("Merchants")
+                    None, lambda: spreadsheet.sheet1
                 )
             except Exception:
                 self._sheet = await loop.run_in_executor(
-                    None, lambda: spreadsheet.add_worksheet(title="Merchants", rows="1000", cols="10")
+                    None, lambda: spreadsheet.get_worksheet(0)
                 )
+
+            # Ensure headers exist on row 1 if sheet is empty
+            rows_count = await loop.run_in_executor(None, lambda: len(self._sheet.get_all_values()))
+            if rows_count == 0:
                 headers = ["UserNo", "Nickname", "Type", "Month Orders", "Finish Rate", "Contacts", "Remarks", "First Seen", "Last Seen"]
                 await loop.run_in_executor(None, lambda: self._sheet.append_row(headers))
 
-            logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id}")
+            logger.info(f"Successfully connected to Google Sheets main sheet1 ID: {self.spreadsheet_id}")
             return True, "OK"
         except ModuleNotFoundError:
             return False, "⚠️ Пакет gspread не установлен. Выполните: pip install gspread google-auth"
@@ -93,7 +103,8 @@ class GoogleSheetsService:
         return self._sheet is not None
 
     async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
-        await self.sync_merchants_batch([(merchant, contacts)])
+        if await self.is_auto_export_enabled():
+            await self.sync_merchants_batch([(merchant, contacts)])
 
     async def sync_merchants_batch(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
         if not self._sheet or not merchant_contacts_list:
@@ -118,10 +129,9 @@ class GoogleSheetsService:
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
-            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
+            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets (sheet1).")
         except Exception as e:
             logger.error(f"Error batch appending rows to Google Sheets: {e}")
-            # Fallback with delay if rate limited
             if "429" in str(e):
                 await asyncio.sleep(2.0)
                 try:
