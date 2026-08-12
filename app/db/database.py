@@ -1,6 +1,5 @@
 import logging
-from sqlalchemy import select, update
-from sqlalchemy.events import event
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config.settings import settings
