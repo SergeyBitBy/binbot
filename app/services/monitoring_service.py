@@ -98,10 +98,16 @@ class MonitoringService:
                     if new_c:
                         new_contacts_count += len(new_c)
 
-                    # Extract payment method names
+                    # Extract payment method names safely from payMethods list of dicts
                     pay_method_names = []
-                    if item.adv.tradeMethods:
-                        pay_method_names = [tm.tradeMethodName for tm in item.adv.tradeMethods if tm.tradeMethodName]
+                    if getattr(item.adv, "payMethods", None):
+                        for pm in item.adv.payMethods:
+                            if isinstance(pm, dict):
+                                name = pm.get("tradeMethodName") or pm.get("identifier") or pm.get("payType")
+                                if name:
+                                    pay_method_names.append(name)
+                            elif isinstance(pm, str):
+                                pay_method_names.append(pm)
 
                     # Dispatch notifications ONLY IF baseline is already completed (Section 43 & 137)
                     if not is_baseline_run:
@@ -178,9 +184,3 @@ class MonitoringService:
         for p in profiles:
             await self.scan_profile(p.id)
             await asyncio.sleep(2.0)
-
-    async def send_daily_summary(self):
-        """Send 09:00 morning summary digest report to all allowed admin chats."""
-        async with AsyncSessionLocal() as session:
-            # Aggregate stats from last 24h
-            pass
