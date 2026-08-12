@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 HEADERS = [
     "UserNo",
+    "Ссылка на Профиль",
     "Никнейм",
     "Статус",
     "Ордеров/Месяц",
@@ -114,7 +115,7 @@ class GoogleSheetsService:
         return self._sheet is not None
 
     async def _apply_formatting(self, total_rows: int):
-        """Apply bold headers, background color, center alignment, and text wrapping across all cells."""
+        """Apply bold headers, background color, center alignment, and text wrapping across all cells (A-J)."""
         if not self._sheet:
             return
 
@@ -122,11 +123,11 @@ class GoogleSheetsService:
         try:
             end_row = max(2, total_rows + 1)
 
-            # 1. Format Data Cells (A1:I{end_row}) - Center Alignment + Text Wrap
+            # 1. Format Data Cells (A1:J{end_row}) - Center Alignment + Text Wrap
             await loop.run_in_executor(
                 None,
                 lambda: self._sheet.format(
-                    f"A1:I{end_row}",
+                    f"A1:J{end_row}",
                     {
                         "horizontalAlignment": "CENTER",
                         "verticalAlignment": "MIDDLE",
@@ -135,11 +136,11 @@ class GoogleSheetsService:
                 ),
             )
 
-            # 2. Format Header Row (A1:I1) - Bold + Light Blue Background + Text Wrap
+            # 2. Format Header Row (A1:J1) - Bold + Light Blue Background + Text Wrap
             await loop.run_in_executor(
                 None,
                 lambda: self._sheet.format(
-                    "A1:I1",
+                    "A1:J1",
                     {
                         "textFormat": {"bold": True, "fontSize": 10},
                         "horizontalAlignment": "CENTER",
@@ -163,14 +164,13 @@ class GoogleSheetsService:
             if not all_vals:
                 await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=[HEADERS]))
             elif all_vals[0] != HEADERS:
-                # Insert HEADERS at top (row 1) which shifts existing merchant rows down by 1 row!
                 await loop.run_in_executor(None, lambda: self._sheet.insert_row(HEADERS, 1))
                 logger.info("Inserted header row at top of Google Sheets and shifted existing rows down.")
         except Exception as e:
             logger.error(f"Error ensuring headers in Google Sheets: {e}")
 
     async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
-        """Clean sheet completely, write headers at A1, write data starting at A2, format center and text wrap."""
+        """Clean sheet completely, write headers at A1, write data starting at A2 with Profile URL in column B."""
         if not self._sheet:
             return
 
@@ -178,15 +178,17 @@ class GoogleSheetsService:
         for merchant, contacts in merchant_contacts_list:
             contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
             user_badge = "Проверенный" if merchant.user_type and "merchant" in merchant.user_type.lower() else "Пользователь"
-            
+            profile_url = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
+
             row = [
                 merchant.user_no,
+                profile_url,
                 merchant.nickname or "",
                 user_badge,
                 merchant.month_order_count,
                 f"{merchant.month_finish_rate * 100:.1f}%",
                 contacts_str,
-                (merchant.remarks or "")[:300],
+                (merchant.remarks or "").replace("\n", " ")[:300],
                 merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
                 merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
             ]
@@ -201,7 +203,7 @@ class GoogleSheetsService:
             await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=rows))
             logger.info(f"Successfully overwrote Google Sheets with {len(rows)-1} merchant rows starting at A1.")
 
-            # Apply Center Alignment, Text Wrap, and Bold Header Formatting
+            # Apply Center Alignment, Text Wrap, and Bold Header Formatting across A-J
             await self._apply_formatting(total_rows=len(rows))
         except Exception as e:
             logger.error(f"Error overwriting Google Sheets: {e}")
@@ -221,15 +223,17 @@ class GoogleSheetsService:
         for merchant, contacts in merchant_contacts_list:
             contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
             user_badge = "Проверенный" if merchant.user_type and "merchant" in merchant.user_type.lower() else "Пользователь"
-            
+            profile_url = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
+
             row = [
                 merchant.user_no,
+                profile_url,
                 merchant.nickname or "",
                 user_badge,
                 merchant.month_order_count,
                 f"{merchant.month_finish_rate * 100:.1f}%",
                 contacts_str,
-                (merchant.remarks or "")[:300],
+                (merchant.remarks or "").replace("\n", " ")[:300],
                 merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
                 merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
             ]
@@ -240,7 +244,7 @@ class GoogleSheetsService:
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
             logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
             
-            # Format and center all rows + enable text wrap!
+            # Format and center all rows (A-J)!
             all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
             await self._apply_formatting(total_rows=len(all_vals))
         except Exception as e:
