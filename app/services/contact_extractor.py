@@ -21,23 +21,24 @@ class ContactExtractor:
     # Regex Patterns with explicit capturing group (group 1)
     PATTERNS = {
         "telegram": [
-            r"(?:t\.me|telegram\.me)/(?:\+)?([a-zA-Z0-9_\+]{5,64})",
-            r"(?:tg|тг|телеграм|telegram|связь|канал|чат)[:\s]*@?([a-zA-Z0-9_]{5,32})",
-            r"(?<!\w)@([a-zA-Z0-9_]{5,32})(?!\w)",
+            r"(?:t\.me|telegram\.me)/(?:\+)?([a-zA-Z0-9_\+]{4,64})",
+            r"(?:tg|тг|телеграм|telegram|связь|канал|чат|контакт|контакты|написать|пишите|инфо|info)[:\s—\-–=]*@?([a-zA-Z0-9_]{4,32})",
+            r"(?<!\w)@([a-zA-Z0-9_]{4,32})(?!\w)",
+            r"(?<!\w)@?([a-zA-Z0-9_]{4,32})(?=\s*(?:📩|📱|💬|✈️|📲))",
         ],
         "whatsapp": [
             r"(?:wa\.me|api\.whatsapp\.com/send\?phone=)(\d{10,15})",
-            r"(?:wa|whatsapp|ватсап|ватцап|вацап)[:\s]*\+?(\d{10,15})",
+            r"(?:wa|whatsapp|ватсап|ватцап|вацап)[:\s—\-–=]*\+?(\d{10,15})",
         ],
         "viber": [
             r"(?:viber\.click|viber://chat\?number=)(\d{10,15})",
-            r"(?:viber|вайбер)[:\s]*\+?(\d{10,15})",
+            r"(?:viber|вайбер)[:\s—\-–=]*\+?(\d{10,15})",
         ],
         "email": [
             r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
         ],
         "instagram": [
-            r"(?:inst|instagram|инстаграм|инста)[:\s]*@?([a-zA-Z0-9._]{3,30})",
+            r"(?:inst|instagram|инстаграм|инста)[:\s—\-–=]*@?([a-zA-Z0-9._]{3,30})",
             r"instagram\.com/([a-zA-Z0-9._]{3,30})",
         ],
         "phone": [
@@ -53,6 +54,7 @@ class ContactExtractor:
         "binance", "support", "admin", "p2p", "help", "bot", "online", "fast",
         "trade", "usdt", "uah", "rub", "usd", "eur", "mono", "privat", "pumb",
         "bank", "card", "pay", "order", "buyer", "seller", "crypto", "change",
+        "privatbank", "monobank", "a-bank", "abank", "vlasnyirakhunok",
     }
 
     @classmethod
@@ -73,7 +75,7 @@ class ContactExtractor:
                     # Normalization
                     if c_type == "telegram":
                         val = val.lstrip("@").strip()
-                        if len(val) < 5 or val.lower() in cls.TG_BLACKLIST or val.isdigit():
+                        if len(val) < 4 or val.lower() in cls.TG_BLACKLIST or val.isdigit():
                             continue
                         val = f"@{val}"
                     elif c_type in ("phone", "whatsapp", "viber"):
