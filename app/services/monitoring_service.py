@@ -98,6 +98,8 @@ class MonitoringService:
                             enriched_adv = detail_data["adv"]
                             item.adv.remarks = enriched_adv.get("remarks") or item.adv.remarks
                             item.adv.autoReplyMsg = enriched_adv.get("autoReplyMsg") or item.adv.autoReplyMsg
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as de:
                         logger.warning(f"Failed to enrich ad {item.adv.advNo}: {de}")
 
@@ -119,7 +121,7 @@ class MonitoringService:
                             elif isinstance(pm, str):
                                 pay_method_names.append(pm)
 
-                    # Dispatch notifications ONLY IF baseline is already completed (Section 43 & 137)
+                    # Dispatch notifications ONLY IF baseline is already completed
                     if not is_baseline_run:
                         if is_new_m:
                             await self.notification_service.notify_new_merchant(
@@ -164,6 +166,11 @@ class MonitoringService:
             scan_record.new_merchants_count = new_merchants_count
             scan_record.new_contacts_count = new_contacts_count
 
+        except asyncio.CancelledError:
+            logger.info(f"Scan for profile '{profile.name}' cancelled due to shutdown.")
+            scan_record.status = "CANCELLED"
+            scan_record.finished_at = datetime.now(timezone.utc)
+            raise
         except Exception as e:
             logger.exception(f"Error executing scan for profile '{profile.name}': {e}")
             scan_record.status = "ERROR"
@@ -174,7 +181,8 @@ class MonitoringService:
             async with AsyncSessionLocal() as session:
                 profile_repo = ProfileRepository(session)
                 await profile_repo.update_lock(profile_id, False)
-                await profile_repo.add_scan_history(scan_record)
+                if scan_record.status != "CANCELLED":
+                    await profile_repo.add_scan_history(scan_record)
 
         logger.info(
             f"Finished scan for profile '{profile.name}'. Ads: {total_ads}, Merchants: {unique_merchants}, "
@@ -183,14 +191,17 @@ class MonitoringService:
         return scan_record
 
     async def scan_all_active_profiles(self):
-        if not await self.is_global_monitoring_enabled():
-            logger.info("Global monitoring is disabled. Skipping scheduled scan.")
-            return
+        try:
+            if not await self.is_global_monitoring_enabled():
+                logger.info("Global monitoring is disabled. Skipping scheduled scan.")
+                return
 
-        async with AsyncSessionLocal() as session:
-            profile_repo = ProfileRepository(session)
-            profiles = await profile_repo.get_all(only_active=True)
+            async with AsyncSessionLocal() as session:
+                profile_repo = ProfileRepository(session)
+                profiles = await profile_repo.get_all(only_active=True)
 
-        for p in profiles:
-            await self.scan_profile(p.id)
-            await asyncio.sleep(2.0)
+            for p in profiles:
+                await self.scan_profile(p.id)
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            logger.info("Monitoring scan task cancelled during bot shutdown.")
