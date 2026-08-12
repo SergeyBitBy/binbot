@@ -10,13 +10,26 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, is_authorized: bool = True):
     user = message.from_user
-    logger.info(f"Received /start command from user_id={user.id if user else 'None'}, username={user.username if user else 'None'}")
+    chat = message.chat
+    logger.info(f"Processing /start for user_id={user.id if user else 'None'}, username={user.username if user else 'None'}, is_authorized={is_authorized}")
+    
+    if not is_authorized:
+        deny_text = (
+            f"⛔ <b>Доступ ограничен.</b> Ваш аккаунт не авторизован для управления бота.\n\n"
+            f"🆔 <b>Ваш Telegram User ID:</b> <code>{user.id if user else 'N/A'}</code>\n"
+            f"💬 <b>Ваш Chat ID:</b> <code>{chat.id if chat else 'N/A'}</code>\n"
+            f"👤 <b>Ваш Username:</b> <code>@{user.username if user and user.username else 'Не задан'}</code>\n\n"
+            f"ℹ️ Передайте ваш User ID или Chat ID суперадминистратору для добавления в список разрешенных."
+        )
+        await message.answer(deny_text, parse_mode="HTML")
+        return
+
     text = (
         "🤖 <b>Binance P2P Monitor Bot v1.0</b>\n\n"
         "Добро пожаловать в административную панель автоматического мониторинга Binance P2P.\n\n"
-        "Используйте меню ниже для управления профилями сканирования, просмотра найденой базы мерчантов и логов."
+        "Используйте меню ниже для управления профилями сканирования, просмотра найденной базы мерчантов и логов."
     )
     await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
 
