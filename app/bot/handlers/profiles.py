@@ -1,18 +1,10 @@
 import logging
-
-from aiogram import F, Router
+from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.keyboards.main_kb import (
-    get_main_menu_keyboard,
-    get_profile_detail_keyboard,
-    get_profiles_keyboard,
+    get_main_menu_keyboard, get_profile_detail_keyboard, get_profiles_keyboard
 )
 from app.bot.states.profile_states import ProfileForm
 from app.db.database import AsyncSessionLocal
@@ -21,15 +13,21 @@ from app.db.repositories.profile_repo import ProfileRepository
 logger = logging.getLogger(__name__)
 router = Router()
 
+async def safe_answer(call: CallbackQuery, text: str = None, show_alert: bool = False):
+    try:
+        await call.answer(text=text, show_alert=show_alert)
+    except Exception:
+        pass
+
 @router.callback_query(F.data == "menu_profiles")
 async def cb_profiles_list(call: CallbackQuery):
+    await safe_answer(call)
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
         profiles = await repo.get_all()
 
     text = "⚙️ <b>СПИСОК ПРОФИЛЕЙ МОНИТОРИНГА</b>\n\nВыберите профиль для просмотра параметров или создайте новый:"
     await call.message.edit_text(text, reply_markup=get_profiles_keyboard(profiles), parse_mode="HTML")
-    await call.answer()
 
 @router.callback_query(F.data.startswith("prof_view_"))
 async def cb_profile_view(call: CallbackQuery):
@@ -39,9 +37,10 @@ async def cb_profile_view(call: CallbackQuery):
         p = await repo.get_by_id(prof_id)
 
     if not p:
-        await call.answer("Профиль не найден", show_alert=True)
+        await safe_answer(call, "Профиль не найден", show_alert=True)
         return
 
+    await safe_answer(call)
     status = "🟢 Активен" if p.is_active else "🔴 Приостановлен"
     baseline = "✅ Завершен" if p.is_baseline_completed else "⏳ Ожидает первого сканирования"
     locked = "🔒 Занят (Сканирование...)" if p.is_locked else "🔓 Свободен"
@@ -60,7 +59,6 @@ async def cb_profile_view(call: CallbackQuery):
     )
 
     await call.message.edit_text(text, reply_markup=get_profile_detail_keyboard(p.id, p.is_active), parse_mode="HTML")
-    await call.answer()
 
 @router.callback_query(F.data.startswith("prof_toggle_"))
 async def cb_profile_toggle(call: CallbackQuery):
@@ -72,7 +70,7 @@ async def cb_profile_toggle(call: CallbackQuery):
             p.is_active = not p.is_active
             await session.commit()
             status_text = "активирован" if p.is_active else "приостановлен"
-            await call.answer(f"Профиль {status_text}!", show_alert=True)
+            await safe_answer(call, f"Профиль {status_text}!", show_alert=True)
 
     await cb_profiles_list(call)
 
@@ -82,18 +80,18 @@ async def cb_profile_delete(call: CallbackQuery):
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
         await repo.delete(prof_id)
-    await call.answer("Профиль удален!", show_alert=True)
+    await safe_answer(call, "Профиль удален!", show_alert=True)
     await cb_profiles_list(call)
 
 # FSM Profile Creation
 @router.callback_query(F.data == "prof_create")
 async def cb_prof_create_start(call: CallbackQuery, state: FSMContext):
+    await safe_answer(call)
     await state.set_state(ProfileForm.name)
     await call.message.edit_text(
         "➕ <b>СОЗДАНИЕ ПРОФИЛЯ</b>\n\nШаг 1/5: Введите название профиля (например: <code>UAH Monobank Buy</code>):",
         parse_mode="HTML"
     )
-    await call.answer()
 
 @router.message(ProfileForm.name)
 async def process_prof_name(message: Message, state: FSMContext):
@@ -120,17 +118,18 @@ async def process_prof_fiat(message: Message, state: FSMContext):
 
 @router.callback_query(ProfileForm.trade_type, F.data.startswith("type_"))
 async def process_prof_trade_type(call: CallbackQuery, state: FSMContext):
+    await safe_answer(call)
     trade_type = call.data.split("_")[1]
     await state.update_data(trade_type=trade_type)
     await state.set_state(ProfileForm.scan_interval)
     await call.message.edit_text("Шаг 5/5: Введите интервал сканирования в секундах (например: <code>60</code>):", parse_mode="HTML")
-    await call.answer()
 
 @router.message(ProfileForm.scan_interval)
 async def process_prof_interval(message: Message, state: FSMContext):
     try:
         interval = int(message.text.strip())
-        interval = max(interval, 10)
+        if interval < 10:
+            interval = 10
     except ValueError:
         interval = 60
 

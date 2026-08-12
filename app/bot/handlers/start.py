@@ -35,9 +35,12 @@ async def cmd_start(message: Message, is_authorized: bool = True):
 
 @router.callback_query(F.data == "menu_main")
 async def cb_main_menu(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
     text = "🤖 <b>Главное Меню Администратора</b>"
     await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
-    await call.answer()
 
 @router.callback_query(F.data == "menu_status")
 @router.message(Command("status"))
@@ -53,7 +56,10 @@ async def cmd_status(event: Message | CallbackQuery):
         f"⚙️ <b>Активных профилей:</b> <code>{metrics['active_profiles']}</code>\n"
     )
     if isinstance(event, CallbackQuery):
+        try:
+            await event.answer()
+        except Exception:
+            pass
         await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
-        await event.answer()
     else:
         await event.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")

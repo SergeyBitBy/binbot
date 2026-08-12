@@ -1,6 +1,5 @@
 import logging
-
-from aiogram import F, Router
+from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
 from app.bot.keyboards.main_kb import get_main_menu_keyboard
@@ -11,6 +10,11 @@ router = Router()
 
 @router.callback_query(F.data == "menu_dashboard")
 async def cb_dashboard(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+        
     metrics = await HealthService.get_dashboard_metrics()
     text = (
         "📊 <b>ДАШБОРД МОНИТОРИНГА BINANCE P2P</b>\n\n"
@@ -22,4 +26,3 @@ async def cb_dashboard(call: CallbackQuery):
         f"⏱ <b>Последний скан:</b> {metrics['last_scan_time']} [{metrics['last_scan_status']}]\n"
     )
     await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
-    await call.answer()
