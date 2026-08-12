@@ -19,6 +19,7 @@ USER_AGENTS = [
 class BinanceClient:
     def __init__(self, timeout: float = None):
         self.url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        self.detail_url = "https://p2p.binance.com/bapi/c2c/v2/public/c2c/adv/detail-with-advertiser"
         self.timeout = timeout or settings.binance_request_timeout
         self.client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True)
 
@@ -69,6 +70,20 @@ class BinanceClient:
                 await asyncio.sleep(1.5 * attempt)
         
         raise BinanceNetworkError("Max retries exceeded")
+
+    async def get_adv_detail(self, adv_no: str) -> Optional[Dict[str, Any]]:
+        """Fetch full advertisement detail including remarks and autoReplyMsg using public GET endpoint."""
+        url = f"{self.detail_url}?channel=c2c&advNo={adv_no}&area=p2pZone"
+        headers = self._get_headers()
+        try:
+            response = await self.client.get(url, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("success") and data.get("code") == "000000":
+                    return data.get("data")
+        except Exception as e:
+            logger.error(f"Error fetching ad detail for advNo {adv_no}: {e}")
+        return None
 
     async def close(self):
         await self.client.aclose()

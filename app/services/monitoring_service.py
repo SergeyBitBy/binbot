@@ -91,6 +91,16 @@ class MonitoringService:
                     if user_no not in processed_user_nos:
                         processed_user_nos.add(user_no)
 
+                    # Enrich ad with full description (remarks & autoReplyMsg) via GET detail endpoint
+                    try:
+                        detail_data = await self.provider.client.get_adv_detail(item.adv.advNo)
+                        if detail_data and "adv" in detail_data:
+                            enriched_adv = detail_data["adv"]
+                            item.adv.remarks = enriched_adv.get("remarks") or item.adv.remarks
+                            item.adv.autoReplyMsg = enriched_adv.get("autoReplyMsg") or item.adv.autoReplyMsg
+                    except Exception as de:
+                        logger.warning(f"Failed to enrich ad {item.adv.advNo}: {de}")
+
                     merchant, is_new_m, new_c, is_new_ad = await merchant_repo.process_binance_item(item)
 
                     if is_new_m:
@@ -98,7 +108,7 @@ class MonitoringService:
                     if new_c:
                         new_contacts_count += len(new_c)
 
-                    # Extract payment method names safely from payMethods list of dicts
+                    # Extract payment method names safely from payMethods
                     pay_method_names = []
                     if getattr(item.adv, "payMethods", None):
                         for pm in item.adv.payMethods:
