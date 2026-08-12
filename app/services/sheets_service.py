@@ -114,13 +114,28 @@ class GoogleSheetsService:
         return self._sheet is not None
 
     async def _apply_formatting(self, total_rows: int):
-        """Apply bold headers, background color, and center alignment across all cells."""
+        """Apply bold headers, background color, center alignment, and text wrapping across all cells."""
         if not self._sheet:
             return
 
         loop = asyncio.get_event_loop()
         try:
-            # 1. Format Header Row (A1:I1)
+            end_row = max(2, total_rows + 1)
+
+            # 1. Format Data Cells (A1:I{end_row}) - Center Alignment + Text Wrap
+            await loop.run_in_executor(
+                None,
+                lambda: self._sheet.format(
+                    f"A1:I{end_row}",
+                    {
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "WRAP",
+                    },
+                ),
+            )
+
+            # 2. Format Header Row (A1:I1) - Bold + Light Blue Background + Text Wrap
             await loop.run_in_executor(
                 None,
                 lambda: self._sheet.format(
@@ -129,20 +144,8 @@ class GoogleSheetsService:
                         "textFormat": {"bold": True, "fontSize": 10},
                         "horizontalAlignment": "CENTER",
                         "verticalAlignment": "MIDDLE",
+                        "wrapStrategy": "WRAP",
                         "backgroundColorStyle": {"rgbColor": {"red": 0.88, "green": 0.92, "blue": 0.98}},
-                    },
-                ),
-            )
-
-            # 2. Format Data Rows (A2:I{total_rows+1}) - Center Alignment
-            end_row = max(2, total_rows + 1)
-            await loop.run_in_executor(
-                None,
-                lambda: self._sheet.format(
-                    f"A1:I{end_row}",
-                    {
-                        "horizontalAlignment": "CENTER",
-                        "verticalAlignment": "MIDDLE",
                     },
                 ),
             )
@@ -150,7 +153,7 @@ class GoogleSheetsService:
             logger.warning(f"Failed to apply formatting to Google Sheets: {e}")
 
     async def ensure_headers_exist(self):
-        """Ensure row 1 contains HEADERS. If row 1 is empty or contains merchant data, insert HEADERS at top."""
+        """Ensure row 1 contains HEADERS. If row 1 does NOT match HEADERS, insert HEADERS at top (row 1) and shift existing rows down."""
         if not self._sheet:
             return
 
@@ -160,14 +163,14 @@ class GoogleSheetsService:
             if not all_vals:
                 await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=[HEADERS]))
             elif all_vals[0] != HEADERS:
-                # If first row is merchant data (not header title), insert HEADERS at top
-                if all_vals[0][0] != HEADERS[0]:
-                    await loop.run_in_executor(None, lambda: self._sheet.insert_row(HEADERS, 1))
+                # Insert HEADERS at top (row 1) which shifts existing merchant rows down by 1 row!
+                await loop.run_in_executor(None, lambda: self._sheet.insert_row(HEADERS, 1))
+                logger.info("Inserted header row at top of Google Sheets and shifted existing rows down.")
         except Exception as e:
             logger.error(f"Error ensuring headers in Google Sheets: {e}")
 
     async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
-        """Clean sheet completely, write headers at A1, write data starting at A2, and center-align all cells."""
+        """Clean sheet completely, write headers at A1, write data starting at A2, format center and text wrap."""
         if not self._sheet:
             return
 
@@ -183,7 +186,7 @@ class GoogleSheetsService:
                 merchant.month_order_count,
                 f"{merchant.month_finish_rate * 100:.1f}%",
                 contacts_str,
-                (merchant.remarks or "").replace("\n", " ")[:300],
+                (merchant.remarks or "")[:300],
                 merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
                 merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
             ]
@@ -198,7 +201,7 @@ class GoogleSheetsService:
             await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=rows))
             logger.info(f"Successfully overwrote Google Sheets with {len(rows)-1} merchant rows starting at A1.")
 
-            # Apply Center Alignment and Bold Header Formatting
+            # Apply Center Alignment, Text Wrap, and Bold Header Formatting
             await self._apply_formatting(total_rows=len(rows))
         except Exception as e:
             logger.error(f"Error overwriting Google Sheets: {e}")
@@ -226,7 +229,7 @@ class GoogleSheetsService:
                 merchant.month_order_count,
                 f"{merchant.month_finish_rate * 100:.1f}%",
                 contacts_str,
-                (merchant.remarks or "").replace("\n", " ")[:300],
+                (merchant.remarks or "")[:300],
                 merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
                 merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
             ]
@@ -237,7 +240,7 @@ class GoogleSheetsService:
             await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
             logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
             
-            # Format and center all rows!
+            # Format and center all rows + enable text wrap!
             all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
             await self._apply_formatting(total_rows=len(all_vals))
         except Exception as e:
