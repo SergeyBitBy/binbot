@@ -1,50 +1,85 @@
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
+from sqlalchemy import select
 
 from app.config.settings import settings
-from app.db.models import Contact, Merchant
+from app.db.database import AsyncSessionLocal
+from app.db.models import Contact, Merchant, SystemSetting
 
 logger = logging.getLogger(__name__)
 
 class GoogleSheetsService:
     def __init__(self):
-        self.enabled = settings.google_sheets_enabled
-        self.credentials_path = Path(settings.google_service_account_file)
-        self.spreadsheet_id = settings.google_spreadsheet_id
+        self.credentials_path = None
+        self.spreadsheet_id = None
         self._client = None
         self._sheet = None
 
-    def is_configured(self) -> bool:
-        return (
-            self.enabled
-            and self.credentials_path.exists()
-            and bool(self.spreadsheet_id.strip())
-        )
+    def _find_credentials_file(self) -> Optional[Path]:
+        candidates = [
+            Path(settings.google_service_account_file),
+            Path("service_account.json"),
+            Path("credentials.json"),
+            Path("google_credentials.json"),
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        return None
+
+    async def get_effective_spreadsheet_id(self) -> str:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(SystemSetting).where(SystemSetting.key == "google_spreadsheet_id"))
+            setting = res.scalar_one_or_none()
+            if setting and setting.value and setting.value != "Не задан":
+                return setting.value.strip()
+        return settings.google_spreadsheet_id or ""
 
     async def initialize(self) -> bool:
-        if not self.is_configured():
-            logger.info("Google Sheets integration is disabled or credentials missing.")
+        self.credentials_path = self._find_credentials_file()
+        self.spreadsheet_id = await self.get_effective_spreadsheet_id()
+
+        if not self.credentials_path:
+            logger.info("Google Sheets: service_account.json credential file not found in project directory.")
+            return False
+
+        if not self.spreadsheet_id:
+            logger.info("Google Sheets: Spreadsheet ID not specified.")
             return False
 
         try:
             import gspread
-            self._client = gspread.service_account(filename=str(self.credentials_path))
-            spreadsheet = self._client.open_by_key(self.spreadsheet_id)
+            loop = asyncio.get_event_loop()
+            self._client = await loop.run_in_executor(
+                None, lambda: gspread.service_account(filename=str(self.credentials_path))
+            )
+            
+            spreadsheet = await loop.run_in_executor(
+                None, lambda: self._client.open_by_key(self.spreadsheet_id)
+            )
             
             # Select or create worksheet
             try:
-                self._sheet = spreadsheet.worksheet("Merchants")
+                self._sheet = await loop.run_in_executor(
+                    None, lambda: spreadsheet.worksheet("Merchants")
+                )
             except Exception:
-                self._sheet = spreadsheet.add_worksheet(title="Merchants", rows="1000", cols="10")
+                self._sheet = await loop.run_in_executor(
+                    None, lambda: spreadsheet.add_worksheet(title="Merchants", rows="1000", cols="10")
+                )
                 headers = ["UserNo", "Nickname", "Type", "Month Orders", "Finish Rate", "Contacts", "Remarks", "First Seen", "Last Seen"]
-                self._sheet.append_row(headers)
+                await loop.run_in_executor(None, lambda: self._sheet.append_row(headers))
 
-            logger.info("Successfully connected to Google Sheets.")
+            logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize Google Sheets service: {e}")
             return False
+
+    def is_configured(self) -> bool:
+        return self._sheet is not None
 
     async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
         if not self._sheet:
@@ -58,13 +93,13 @@ class GoogleSheetsService:
             merchant.month_order_count,
             f"{merchant.month_finish_rate * 100:.1f}%",
             contacts_str,
-            (merchant.remarks or "")[:200],
+            (merchant.remarks or "")[:300],
             merchant.first_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.first_seen_at else "",
             merchant.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if merchant.last_seen_at else "",
         ]
 
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._sheet.append_row, row)
+            await loop.run_in_executor(None, lambda: self._sheet.append_row(row))
         except Exception as e:
             logger.error(f"Error appending row to Google Sheets: {e}")
