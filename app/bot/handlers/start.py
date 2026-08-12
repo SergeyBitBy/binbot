@@ -23,7 +23,11 @@ async def cmd_start(message: Message, is_authorized: bool = True):
             f"👤 <b>Ваш Username:</b> <code>@{user.username if user and user.username else 'Не задан'}</code>\n\n"
             f"ℹ️ Передайте ваш User ID или Chat ID суперадминистратору для добавления в список разрешенных."
         )
-        await message.answer(deny_text, parse_mode="HTML")
+        try:
+            await message.answer(deny_text, parse_mode="HTML")
+            logger.info("Access denied message sent successfully.")
+        except Exception as e:
+            logger.error(f"Error sending access denied message: {e}")
         return
 
     text = (
@@ -31,7 +35,11 @@ async def cmd_start(message: Message, is_authorized: bool = True):
         "Добро пожаловать в административную панель автоматического мониторинга Binance P2P.\n\n"
         "Используйте меню ниже для управления профилями сканирования, просмотра найденной базы мерчантов и логов."
     )
-    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    try:
+        await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        logger.info(f"Successfully sent /start main menu to user_id={user.id if user else 'None'}")
+    except Exception as e:
+        logger.error(f"Failed to send /start main menu message: {e}")
 
 @router.callback_query(F.data == "menu_main")
 async def cb_main_menu(call: CallbackQuery):
@@ -40,7 +48,10 @@ async def cb_main_menu(call: CallbackQuery):
     except Exception:
         pass
     text = "🤖 <b>Главное Меню Администратора</b>"
-    await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    try:
+        await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to edit main menu: {e}")
 
 @router.callback_query(F.data == "menu_status")
 @router.message(Command("status"))
@@ -60,6 +71,12 @@ async def cmd_status(event: Message | CallbackQuery):
             await event.answer()
         except Exception:
             pass
-        await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        try:
+            await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to edit status message: {e}")
     else:
-        await event.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        try:
+            await event.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to send status message: {e}")

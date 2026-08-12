@@ -41,6 +41,18 @@ async def main():
     bot_info = await bot.get_me()
     logger.info(f"Connected to Telegram as @{bot_info.username} (ID: {bot_info.id})")
 
+    # Send startup notification to initial chat if configured
+    if settings.initial_allowed_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=settings.initial_allowed_chat_id,
+                text="🚀 <b>Binance P2P Monitor Bot успешно запущен на сервере!</b>\n\nОтправьте /start для открытия меню.",
+                parse_mode="HTML",
+            )
+            logger.info(f"Sent startup message to chat_id={settings.initial_allowed_chat_id}")
+        except Exception as se:
+            logger.warning(f"Could not send startup message to chat_id={settings.initial_allowed_chat_id}: {se}")
+
     dp = Dispatcher()
     dp.message.outer_middleware(AuthMiddleware())
     dp.callback_query.outer_middleware(AuthMiddleware())
