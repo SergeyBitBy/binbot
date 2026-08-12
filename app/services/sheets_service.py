@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from sqlalchemy import select
 
 from app.config.settings import settings
@@ -37,17 +37,15 @@ class GoogleSheetsService:
                 return setting.value.strip()
         return settings.google_spreadsheet_id or ""
 
-    async def initialize(self) -> bool:
+    async def initialize_with_status(self) -> Tuple[bool, str]:
         self.credentials_path = self._find_credentials_file()
         self.spreadsheet_id = await self.get_effective_spreadsheet_id()
 
         if not self.credentials_path:
-            logger.info("Google Sheets: service_account.json credential file not found in project directory.")
-            return False
+            return False, "⚠️ Файл service_account.json не найден в папке бота."
 
         if not self.spreadsheet_id:
-            logger.info("Google Sheets: Spreadsheet ID not specified.")
-            return False
+            return False, "⚠️ ID/Ссылка Google Таблицы не задана в настройках."
 
         try:
             import gspread
@@ -73,13 +71,23 @@ class GoogleSheetsService:
                 await loop.run_in_executor(None, lambda: self._sheet.append_row(headers))
 
             logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id}")
-            return True
-        except ModuleNotFoundError as me:
-            logger.error("gspread library is not installed. Please run: pip install gspread google-auth")
-            return False
+            return True, "OK"
+        except ModuleNotFoundError:
+            return False, "⚠️ Пакет gspread не установлен. Выполните: pip install gspread google-auth"
         except Exception as e:
-            logger.exception(f"Failed to initialize Google Sheets service (Spreadsheet ID: {self.spreadsheet_id}): {e}")
-            return False
+            err_str = str(e)
+            if "Sheets API has not been used" in err_str or "403" in err_str:
+                msg = "⚠️ Google Sheets API выключен в вашем проекте Google Cloud. Нажмите «Включить API» по ссылке в инструкции."
+            elif "404" in err_str or "SpreadsheetNotFound" in type(e).__name__:
+                msg = "⚠️ Таблица не найдена или не открыт доступ для email сервисного аккаунта."
+            else:
+                msg = f"⚠️ Ошибка Google API: {err_str[:150]}"
+            logger.exception(f"Failed to initialize Google Sheets service: {e}")
+            return False, msg
+
+    async def initialize(self) -> bool:
+        success, _ = await self.initialize_with_status()
+        return success
 
     def is_configured(self) -> bool:
         return self._sheet is not None
