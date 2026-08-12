@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+from pathlib import Path
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -20,6 +22,7 @@ class QuietHoursForm(StatesGroup):
 
 class GoogleSheetsForm(StatesGroup):
     sheet_id = State()
+    service_account_file = State()
 
 async def get_setting(key: str, default: str = "") -> str:
     async with AsyncSessionLocal() as session:
@@ -74,6 +77,18 @@ async def cb_settings_menu(call: CallbackQuery):
     sheet_id = await get_setting("google_spreadsheet_id", "Не задан")
     sheets_auto = await get_setting("google_sheets_auto_export", "false")
 
+    # Check if service account file exists
+    json_path = Path("service_account.json")
+    if json_path.exists():
+        try:
+            js_data = json.loads(json_path.read_text(encoding="utf-8"))
+            client_email = js_data.get("client_email", "Файл загружен")
+            json_status = f"🟢 Загружен (<code>{client_email}</code>)"
+        except Exception:
+            json_status = "🟢 Файл найден"
+    else:
+        json_status = "🔴 Файл отсутствует"
+
     mon_status = "🟢 Включен" if global_mon.lower() == "true" else "🔴 Выключен"
     quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_hours.lower() == "true" else "🔴 Выключено"
     contact_status = "🟢 Включен" if contact_ext.lower() == "true" else "🔴 Выключен"
@@ -85,6 +100,7 @@ async def cb_settings_menu(call: CallbackQuery):
         f"🌙 <b>Тихое Время (Quiet Hours):</b> {quiet_status}\n"
         f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n\n"
         f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
+        f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
         f"🔄 <b>Режим Экспорта Таблицы:</b> {sheets_auto_status}\n"
     )
 
@@ -99,9 +115,10 @@ async def cb_settings_menu(call: CallbackQuery):
         ],
         [
             InlineKeyboardButton(text="📊 Ссылка/ID Google Таблицы", callback_data="set_google_sheet_id"),
-            InlineKeyboardButton(text="🔄 Авто/Ручной Экспорт", callback_data="toggle_sheets_auto"),
+            InlineKeyboardButton(text="📄 Загрузить service_account.json", callback_data="upload_service_account"),
         ],
         [
+            InlineKeyboardButton(text="🔄 Авто/Ручной Экспорт", callback_data="toggle_sheets_auto"),
             InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="run_google_sheets_export_prompt"),
         ],
         [
@@ -110,6 +127,56 @@ async def cb_settings_menu(call: CallbackQuery):
     ]
 
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "upload_service_account")
+async def cb_upload_service_account_start(call: CallbackQuery, state: FSMContext):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+    await state.set_state(GoogleSheetsForm.service_account_file)
+    
+    text = (
+        "📄 <b>ИНСТРУКЦИЯ ПО ПОЛУЧЕНИЮ КЛЮЧА GOOGLE SERVICE ACCOUNT</b>\n\n"
+        "1️⃣ Откройте <a href='https://console.cloud.google.com/'>Google Cloud Console</a>.\n"
+        "2️⃣ Создайте новый проект или выберите существующий.\n"
+        "3️⃣ Перейдите в раздел <b>APIs & Services</b> ➔ <b>Library</b> и включите:\n"
+        "   • <b>Google Sheets API</b>\n"
+        "   • <b>Google Drive API</b>\n"
+        "4️⃣ Перейдите в <b>APIs & Services</b> ➔ <b>Credentials</b> ➔ <b>Create Credentials</b> ➔ <b>Service Account</b>.\n"
+        "5️⃣ В созданном сервисном аккаунте откройте вкладку <b>Keys</b> ➔ <b>Add Key</b> ➔ <b>Create new key</b> ➔ Выберите формат <b>JSON</b>.\n"
+        "6️⃣ Скачанный `.json` файл просто <b>отправьте документом прямо в этот чат</b>.\n\n"
+        "⬇️ <i>Жду отправки файла service_account.json...</i>"
+    )
+    await call.message.edit_text(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
+
+@router.message(GoogleSheetsForm.service_account_file, F.document)
+async def process_service_account_file(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc.file_name.endswith(".json"):
+        await message.answer("⚠️ <b>Пожалуйста, отправьте файл в формате .json!</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+        return
+
+    await state.clear()
+    bot = message.bot
+    target_path = Path("service_account.json")
+
+    file_info = await bot.get_file(doc.file_id)
+    await bot.download_file(file_info.file_path, destination=target_path)
+
+    client_email = "Неизвестен"
+    try:
+        data = json.loads(target_path.read_text(encoding="utf-8"))
+        client_email = data.get("client_email", client_email)
+    except Exception as e:
+        logger.error(f"Error parsing uploaded JSON: {e}")
+
+    text = (
+        "✅ <b>ФАЙЛ service_account.json УСПЕШНО ЗАГРУЖЕН И СОХРАНЕН!</b>\n\n"
+        f"📧 <b>Email Сервисного Аккаунта:</b>\n<code>{client_email}</code>\n\n"
+        "⚠️ <b>ВАЖНО:</b> Скопируйте этот Email и добавьте его с правами <b>Редактора</b> в вашей Google Таблице (кнопка <i>Поделиться / Share</i>)."
+    )
+    await message.answer(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
 
 @router.callback_query(F.data == "toggle_quiet_hours")
 async def cb_toggle_quiet(call: CallbackQuery):
@@ -189,7 +256,7 @@ async def cb_run_sheets_export_do(call: CallbackQuery):
     await sheets_service.initialize()
     if not sheets_service.is_configured():
         try:
-            await call.answer("⚠️ Google Sheets не настроен или нет файла service_account.json", show_alert=True)
+            await call.answer("⚠️ Google Sheets не настроен или отсутствует файл service_account.json", show_alert=True)
         except Exception:
             pass
         return
