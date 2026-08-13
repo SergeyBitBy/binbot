@@ -6,6 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.bot.access import is_action_allowed, normalize_role
+from app.bot.keyboards.main_kb import get_main_menu_keyboard
 from app.db.models import (
     AllowedChat,
     Base,
@@ -130,6 +132,60 @@ def test_sheets_dates_are_converted_from_utc_to_kyiv(monkeypatch):
         "2026-08-14 01:14",
         "2026-08-14 01:14",
     ]
+
+
+def test_sheets_contact_column_contains_values_only():
+    merchant = SimpleNamespace(
+        user_no="u1",
+        nickname="Trader",
+        user_type="merchant",
+        month_order_count=1,
+        month_finish_rate=1.0,
+        remarks="",
+        first_seen_at=None,
+        last_seen_at=None,
+    )
+    contacts = [
+        SimpleNamespace(type="telegram", value="@trader"),
+        SimpleNamespace(type="phone", value="+380501234567"),
+    ]
+    assert GoogleSheetsService()._build_row(merchant, contacts, [{"key": "contacts"}]) == [
+        "@trader, +380501234567"
+    ]
+
+
+def test_role_permissions_are_enforced_fail_closed():
+    assert normalize_role("unexpected") == "viewer"
+    assert is_action_allowed("superadmin", callback_data="menu_settings")
+    assert not is_action_allowed("admin", callback_data="menu_settings")
+    assert is_action_allowed("admin", callback_data="prof_toggle_1")
+    assert not is_action_allowed("viewer", callback_data="prof_toggle_1")
+    assert is_action_allowed("viewer", callback_data="merch_card_1_1_all")
+    assert not is_action_allowed("viewer", state="MerchantEditForm:contact_value")
+    assert not is_action_allowed("admin", state="GoogleSheetsForm:sheet_id")
+
+
+def test_main_menu_hides_actions_unavailable_to_role():
+    viewer_callbacks = {
+        button.callback_data
+        for row in get_main_menu_keyboard(role="viewer").inline_keyboard
+        for button in row
+    }
+    admin_callbacks = {
+        button.callback_data
+        for row in get_main_menu_keyboard(role="admin").inline_keyboard
+        for button in row
+    }
+    superadmin_callbacks = {
+        button.callback_data
+        for row in get_main_menu_keyboard(role="superadmin").inline_keyboard
+        for button in row
+    }
+    assert "menu_settings" not in viewer_callbacks
+    assert "menu_scan_now" not in viewer_callbacks
+    assert "menu_scan_now" in admin_callbacks
+    assert "menu_settings" not in admin_callbacks
+    assert {"menu_settings", "menu_admins", "menu_chats"} <= superadmin_callbacks
 
 
 @pytest.mark.asyncio

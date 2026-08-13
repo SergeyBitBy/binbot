@@ -1,13 +1,23 @@
 import logging
-from aiogram import Router, F
+
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.bot.keyboards.main_kb import (
-    get_main_menu_keyboard, get_profile_detail_keyboard, get_profiles_keyboard,
-    get_paytypes_multiselect_keyboard, get_wizard_nav_keyboard, get_back_menu_keyboard
+    get_back_menu_keyboard,
+    get_main_menu_keyboard,
+    get_paytypes_multiselect_keyboard,
+    get_profile_detail_keyboard,
+    get_profiles_keyboard,
+    get_wizard_nav_keyboard,
 )
-from app.bot.states.profile_states import ProfileForm, ProfileEditForm
+from app.bot.states.profile_states import ProfileEditForm, ProfileForm
 from app.db.database import AsyncSessionLocal
 from app.db.repositories.profile_repo import ProfileRepository
 
@@ -21,17 +31,17 @@ async def safe_answer(call: CallbackQuery, text: str = None, show_alert: bool = 
         pass
 
 @router.callback_query(F.data == "menu_profiles")
-async def cb_profiles_list(call: CallbackQuery):
+async def cb_profiles_list(call: CallbackQuery, role: str = "viewer"):
     await safe_answer(call)
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
         profiles = await repo.get_all()
 
     text = "⚙️ <b>СПИСОК ПРОФИЛЕЙ МОНИТОРИНГА</b>\n\nВыберите профиль для просмотра или настройки:"
-    await call.message.edit_text(text, reply_markup=get_profiles_keyboard(profiles), parse_mode="HTML")
+    await call.message.edit_text(text, reply_markup=get_profiles_keyboard(profiles, role), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("prof_view_"))
-async def cb_profile_view(call: CallbackQuery):
+async def cb_profile_view(call: CallbackQuery, role: str = "viewer"):
     prof_id = int(call.data.split("_")[2])
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
@@ -59,10 +69,14 @@ async def cb_profile_view(call: CallbackQuery):
         f"⏱ <b>Интервал сканирования:</b> <code>{p.scan_interval_seconds} сек</code>\n"
     )
 
-    await call.message.edit_text(text, reply_markup=get_profile_detail_keyboard(p.id, p.is_active, p.merchant_check), parse_mode="HTML")
+    await call.message.edit_text(
+        text,
+        reply_markup=get_profile_detail_keyboard(p.id, p.is_active, p.merchant_check, role),
+        parse_mode="HTML",
+    )
 
 @router.callback_query(F.data.startswith("prof_toggle_"))
-async def cb_profile_toggle(call: CallbackQuery):
+async def cb_profile_toggle(call: CallbackQuery, role: str = "admin"):
     prof_id = int(call.data.split("_")[2])
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
@@ -73,10 +87,10 @@ async def cb_profile_toggle(call: CallbackQuery):
             status_text = "активирован" if p.is_active else "приостановлен"
             await safe_answer(call, f"Профиль {status_text}!", show_alert=True)
 
-    await cb_profile_view(call)
+    await cb_profile_view(call, role)
 
 @router.callback_query(F.data.startswith("prof_check_"))
-async def cb_profile_check_toggle(call: CallbackQuery):
+async def cb_profile_check_toggle(call: CallbackQuery, role: str = "admin"):
     prof_id = int(call.data.split("_")[2])
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
@@ -87,7 +101,7 @@ async def cb_profile_check_toggle(call: CallbackQuery):
             status_text = "Только проверенные" if p.merchant_check else "Все мерчанты"
             await safe_answer(call, f"Фильтр изменен: {status_text}", show_alert=True)
 
-    await cb_profile_view(call)
+    await cb_profile_view(call, role)
 
 # Edit Scan Interval
 @router.callback_query(F.data.startswith("prof_interval_"))
@@ -143,7 +157,7 @@ async def cb_profile_paytypes(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=get_paytypes_multiselect_keyboard(p.id, p.pay_types), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("pay_toggle_"))
-async def cb_paytype_toggle(call: CallbackQuery):
+async def cb_paytype_toggle(call: CallbackQuery, role: str = "admin"):
     parts = call.data.split("_")
     prof_id = int(parts[2])
     bank_name = "_".join(parts[3:])
@@ -177,20 +191,20 @@ async def cb_profile_delete_confirm(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("prof_delete_do_"))
-async def cb_profile_delete_do(call: CallbackQuery):
+async def cb_profile_delete_do(call: CallbackQuery, role: str = "superadmin"):
     prof_id = int(call.data.split("_")[3])
     async with AsyncSessionLocal() as session:
         repo = ProfileRepository(session)
         await repo.delete(prof_id)
     await safe_answer(call, "Профиль удален!", show_alert=True)
-    await cb_profiles_list(call)
+    await cb_profiles_list(call, role)
 
 # FSM Profile Creation Wizard with Back & Cancel buttons
 @router.callback_query(F.data == "prof_cancel")
-async def cb_prof_cancel(call: CallbackQuery, state: FSMContext):
+async def cb_prof_cancel(call: CallbackQuery, state: FSMContext, role: str = "admin"):
     await state.clear()
     await safe_answer(call, "Создание профиля отменено.")
-    await cb_profiles_list(call)
+    await cb_profiles_list(call, role)
 
 @router.callback_query(F.data == "prof_create")
 async def cb_prof_create_step1(call: CallbackQuery, state: FSMContext):

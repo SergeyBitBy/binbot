@@ -1,8 +1,10 @@
 import logging
 from typing import Any, Awaitable, Callable, Dict
+
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
+from app.bot.access import is_action_allowed, normalize_role
 from app.db.database import AsyncSessionLocal
 from app.db.repositories.audit_repo import AuditRepository
 
@@ -53,18 +55,22 @@ class AuthMiddleware(BaseMiddleware):
                 is_private = event.message.chat.type == "private"
             if is_user_ok and (is_private or is_chat_ok):
                 data["is_authorized"] = True
-                data["role"] = role or "admin"
+                data["role"] = normalize_role(role)
                 callback_data = event.data if isinstance(event, CallbackQuery) else ""
-                command_text = text.split()[0].lower() if text else ""
-                superadmin_prefixes = (
-                    "adm_", "chat_", "merch_delete_", "merch_clear_all_",
-                    "prof_delete_", "menu_backup_db",
-                )
-                if callback_data.startswith(superadmin_prefixes) and data["role"] != "superadmin":
-                    await event.answer("⛔ Требуются права superadmin", show_alert=True)
-                    return None
-                if command_text in ("/backup", "/retry_notifications") and data["role"] != "superadmin":
-                    await event.answer("⛔ Требуются права superadmin")
+                command_text = text.split()[0].lower().split("@", 1)[0] if text else ""
+                state = data.get("raw_state") or ""
+                if not state and data.get("state"):
+                    state = await data["state"].get_state() or ""
+                if not is_action_allowed(
+                    data["role"],
+                    callback_data=callback_data,
+                    command=command_text,
+                    state=state,
+                ):
+                    if isinstance(event, CallbackQuery):
+                        await event.answer("⛔ Недостаточно прав для этого действия", show_alert=True)
+                    else:
+                        await event.answer("⛔ Недостаточно прав для этого действия")
                     return None
                 return await handler(event, data)
 

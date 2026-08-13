@@ -1,13 +1,19 @@
 import logging
-from aiogram import Router, F
+
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.bot.keyboards.main_kb import get_back_menu_keyboard
+from app.bot.states.merchant_states import MerchantSearchForm
 from app.db.database import AsyncSessionLocal
 from app.db.repositories.merchant_repo import MerchantRepository
-from app.bot.states.merchant_states import MerchantSearchForm
 from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
@@ -56,12 +62,12 @@ async def send_split_message(event: Message | CallbackQuery, text: str, reply_ma
             await msg.answer(chunk, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 @router.callback_query(F.data == "menu_merchants")
-async def cb_merchants_menu(call: CallbackQuery):
+async def cb_merchants_menu(call: CallbackQuery, role: str = "viewer"):
     await safe_answer(call)
-    await cb_merchants_page(call, page=1, mode="all")
+    await cb_merchants_page(call, page=1, mode="all", role=role)
 
 @router.callback_query(F.data.startswith("merch_page_"))
-async def cb_merchants_page(call: CallbackQuery, page: int = None, mode: str = "all"):
+async def cb_merchants_page(call: CallbackQuery, page: int = None, mode: str = "all", role: str = "viewer"):
     if page is None:
         parts = call.data.split("_")
         page = int(parts[2])
@@ -117,14 +123,13 @@ async def cb_merchants_page(call: CallbackQuery, page: int = None, mode: str = "
         nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"merch_page_{page + 1}_{mode}"))
     buttons.append(nav_row)
 
-    buttons.append([
-        InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="merch_export_sheets_prompt"),
-        InlineKeyboardButton(text="🔎 Поиск", callback_data="merch_search_start"),
-    ])
-    buttons.append([
-        InlineKeyboardButton(text="🗑 Очистить Всю Базу", callback_data="merch_clear_all_confirm"),
-        InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main"),
-    ])
+    actions = [InlineKeyboardButton(text="🔎 Поиск", callback_data="merch_search_start")]
+    if role in ("admin", "superadmin"):
+        actions.insert(0, InlineKeyboardButton(text="📊 Экспорт в Google Sheets", callback_data="merch_export_sheets_prompt"))
+    buttons.append(actions)
+    if role == "superadmin":
+        buttons.append([InlineKeyboardButton(text="🗑 Очистить Всю Базу", callback_data="merch_clear_all_confirm")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main")])
 
     await send_split_message(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -163,7 +168,7 @@ async def cb_merch_export_do(call: CallbackQuery):
     await cb_merchants_page(call, page=1)
 
 @router.callback_query(F.data.startswith("merch_card_"))
-async def cb_merchant_card(call: CallbackQuery):
+async def cb_merchant_card(call: CallbackQuery, role: str = "viewer"):
     parts = call.data.split("_")
     m_id = int(parts[2])
     current_page = int(parts[3]) if len(parts) > 3 else 1
@@ -202,14 +207,22 @@ async def cb_merchant_card(call: CallbackQuery):
         f"📝 <b>Описание / Условия:</b>\n<i>«{remarks_text}»</i>\n"
     )
 
-    buttons = [
-        [
+    buttons = []
+    edit_actions = []
+    if role in ("admin", "superadmin"):
+        edit_actions.append(
             InlineKeyboardButton(text="✏️ Изменить мерчанта (Добавить контакт)", callback_data=f"merch_edit_{m.id}_{current_page}_{mode}"),
+        )
+    if role == "superadmin":
+        edit_actions.append(
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"merch_delete_{m.id}_{current_page}_{mode}"),
-        ],
+        )
+    if edit_actions:
+        buttons.append(edit_actions)
+    buttons.extend([
         [InlineKeyboardButton(text="🔗 Профиль на Binance P2P", url=profile_url)],
         [InlineKeyboardButton(text="⬅️ Назад к Списку", callback_data=f"merch_page_{current_page}_{mode}")],
-    ]
+    ])
 
     await send_split_message(call, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 

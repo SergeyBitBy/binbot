@@ -1,9 +1,11 @@
 from typing import List, Optional
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.db.models import MonitoringProfile
 
-def get_main_menu_keyboard(monitoring_enabled: bool = True) -> InlineKeyboardMarkup:
+
+def get_main_menu_keyboard(monitoring_enabled: bool = True, role: str = "superadmin") -> InlineKeyboardMarkup:
     toggle_text = "⏸ Выключить Анализ" if monitoring_enabled else "▶️ Запустить Анализ"
     toggle_data = "toggle_global_monitoring"
 
@@ -14,28 +16,28 @@ def get_main_menu_keyboard(monitoring_enabled: bool = True) -> InlineKeyboardMar
         ],
         [
             InlineKeyboardButton(text="🔍 База Мерчантов", callback_data="menu_merchants"),
-            InlineKeyboardButton(text=f"{toggle_text}", callback_data=toggle_data),
-        ],
-        [
-            InlineKeyboardButton(text="👥 Управление Админами", callback_data="menu_admins"),
-            InlineKeyboardButton(text="💬 Разрешенные Чаты", callback_data="menu_chats"),
-        ],
-        [
-            InlineKeyboardButton(text="⚙️ Глобальные Настройки", callback_data="menu_settings"),
             InlineKeyboardButton(text="📜 История Сканов", callback_data="menu_scan_history"),
         ],
-        [
-            InlineKeyboardButton(text="📊 Экспорт Google Sheets", callback_data="merch_export_sheets_prompt"),
-            InlineKeyboardButton(text="💾 Бэкап БД", callback_data="menu_backup_db"),
-        ],
-        [
-            InlineKeyboardButton(text="⚡ Сканировать Сейчас", callback_data="menu_scan_now"),
-            InlineKeyboardButton(text="ℹ️ Статус Сервера", callback_data="menu_status"),
-        ],
+        [InlineKeyboardButton(text="ℹ️ Статус Сервера", callback_data="menu_status")],
     ]
+    if role in ("admin", "superadmin"):
+        keyboard.insert(2, [
+            InlineKeyboardButton(text="📊 Экспорт Google Sheets", callback_data="merch_export_sheets_prompt"),
+            InlineKeyboardButton(text="⚡ Сканировать Сейчас", callback_data="menu_scan_now"),
+        ])
+    if role == "superadmin":
+        keyboard[1].insert(1, InlineKeyboardButton(text=toggle_text, callback_data=toggle_data))
+        keyboard.insert(3, [
+            InlineKeyboardButton(text="👥 Управление Пользователями", callback_data="menu_admins"),
+            InlineKeyboardButton(text="💬 Разрешенные Чаты", callback_data="menu_chats"),
+        ])
+        keyboard.insert(4, [
+            InlineKeyboardButton(text="⚙️ Глобальные Настройки", callback_data="menu_settings"),
+            InlineKeyboardButton(text="💾 Бэкап БД", callback_data="menu_backup_db"),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_profiles_keyboard(profiles: List[MonitoringProfile]) -> InlineKeyboardMarkup:
+def get_profiles_keyboard(profiles: List[MonitoringProfile], role: str = "superadmin") -> InlineKeyboardMarkup:
     buttons = []
     for p in profiles:
         status_icon = "🟢" if p.is_active else "🔴"
@@ -46,30 +48,37 @@ def get_profiles_keyboard(profiles: List[MonitoringProfile]) -> InlineKeyboardMa
                 callback_data=f"prof_view_{p.id}"
             )
         ])
-    buttons.append([InlineKeyboardButton(text="➕ Создать Профиль", callback_data="prof_create")])
+    if role in ("admin", "superadmin"):
+        buttons.append([InlineKeyboardButton(text="➕ Создать Профиль", callback_data="prof_create")])
     buttons.append([InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_profile_detail_keyboard(profile_id: int, is_active: bool, merchant_check: bool) -> InlineKeyboardMarkup:
+def get_profile_detail_keyboard(
+    profile_id: int,
+    is_active: bool,
+    merchant_check: bool,
+    role: str = "superadmin",
+) -> InlineKeyboardMarkup:
     toggle_text = "🔴 Приостановить" if is_active else "🟢 Активировать"
     check_text = "🛡️ Только проверенные: ВКЛ" if merchant_check else "🌐 Все Мерчанты: ВКЛ"
 
-    buttons = [
-        [
+    buttons = []
+    if role in ("admin", "superadmin"):
+        buttons.extend([
+            [
             InlineKeyboardButton(text=toggle_text, callback_data=f"prof_toggle_{profile_id}"),
             InlineKeyboardButton(text=check_text, callback_data=f"prof_check_{profile_id}"),
-        ],
-        [
+            ],
+            [
             InlineKeyboardButton(text="⏱ Изменить Интервал", callback_data=f"prof_interval_{profile_id}"),
             InlineKeyboardButton(text="💳 Способы Оплаты", callback_data=f"prof_paytypes_{profile_id}"),
-        ],
-        [
+            ],
+        ])
+    if role == "superadmin":
+        buttons.append([
             InlineKeyboardButton(text="🗑 Удалить Профиль", callback_data=f"prof_delete_confirm_{profile_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="⬅️ К Списку Профилей", callback_data="menu_profiles"),
-        ],
-    ]
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ К Списку Профилей", callback_data="menu_profiles")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_paytypes_multiselect_keyboard(profile_id: int, selected_paytypes: List[str]) -> InlineKeyboardMarkup:

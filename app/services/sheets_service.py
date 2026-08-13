@@ -195,7 +195,7 @@ class GoogleSheetsService:
             logger.warning(f"Failed to apply formatting to Google Sheets: {e}")
 
     def _build_row(self, merchant: Merchant, contacts: list[Contact], enabled_cols: List[Dict[str, Any]]) -> List[Any]:
-        contacts_str = ", ".join([f"{c.type}:{c.value}" for c in contacts])
+        contacts_str = ", ".join(c.value for c in contacts)
         user_badge = "Проверенный" if merchant.user_type and "merchant" in merchant.user_type.lower() else "Пользователь"
         profile_url = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
 

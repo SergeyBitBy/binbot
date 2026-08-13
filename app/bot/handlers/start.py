@@ -1,5 +1,6 @@
 import logging
-from aiogram import Router, F
+
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, is_authorized: bool = True):
+async def cmd_start(message: Message, is_authorized: bool = True, role: str = "viewer"):
     user = message.from_user
     chat = message.chat
     logger.info(f"Processing /start for user_id={user.id if user else 'None'}, username={user.username if user else 'None'}, is_authorized={is_authorized}")
@@ -36,26 +37,26 @@ async def cmd_start(message: Message, is_authorized: bool = True):
         "Используйте меню ниже для управления профилями сканирования, просмотра найденной базы мерчантов и логов."
     )
     try:
-        await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        await message.answer(text, reply_markup=get_main_menu_keyboard(role=role), parse_mode="HTML")
         logger.info(f"Successfully sent /start main menu to user_id={user.id if user else 'None'}")
     except Exception as e:
         logger.error(f"Failed to send /start main menu message: {e}")
 
 @router.callback_query(F.data == "menu_main")
-async def cb_main_menu(call: CallbackQuery):
+async def cb_main_menu(call: CallbackQuery, role: str = "viewer"):
     try:
         await call.answer()
     except Exception:
         pass
     text = "🤖 <b>Главное Меню Администратора</b>"
     try:
-        await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(role=role), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Failed to edit main menu: {e}")
 
 @router.callback_query(F.data == "menu_status")
 @router.message(Command("status"))
-async def cmd_status(event: Message | CallbackQuery):
+async def cmd_status(event: Message | CallbackQuery, role: str = "viewer"):
     metrics = await HealthService.get_dashboard_metrics()
     text = (
         "ℹ️ <b>СТАТУС И ЗДОРОВЬЕ СИСТЕМЫ</b>\n\n"
@@ -72,11 +73,11 @@ async def cmd_status(event: Message | CallbackQuery):
         except Exception:
             pass
         try:
-            await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+            await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(role=role), parse_mode="HTML")
         except Exception as e:
             logger.error(f"Failed to edit status message: {e}")
     else:
         try:
-            await event.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+            await event.answer(text, reply_markup=get_main_menu_keyboard(role=role), parse_mode="HTML")
         except Exception as e:
             logger.error(f"Failed to send status message: {e}")
