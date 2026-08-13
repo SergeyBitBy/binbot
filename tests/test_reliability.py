@@ -6,7 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.bot.access import is_action_allowed, normalize_role
+from app.bot.access import (
+    can_change_role,
+    can_delete_user,
+    is_action_allowed,
+    normalize_role,
+)
 from app.bot.keyboards.main_kb import get_main_menu_keyboard
 from app.db.models import (
     AllowedChat,
@@ -186,6 +191,55 @@ def test_main_menu_hides_actions_unavailable_to_role():
     assert "menu_scan_now" in admin_callbacks
     assert "menu_settings" not in admin_callbacks
     assert {"menu_settings", "menu_admins", "menu_chats"} <= superadmin_callbacks
+
+
+def test_superadmin_safety_guards():
+    assert can_change_role(
+        actor_user_id=1,
+        target_user_id=2,
+        current_role="admin",
+        new_role="superadmin",
+        superadmin_count=1,
+    )
+    assert not can_change_role(
+        actor_user_id=1,
+        target_user_id=1,
+        current_role="superadmin",
+        new_role="admin",
+        superadmin_count=2,
+    )
+    assert not can_change_role(
+        actor_user_id=1,
+        target_user_id=2,
+        current_role="superadmin",
+        new_role="viewer",
+        superadmin_count=1,
+    )
+    assert can_change_role(
+        actor_user_id=1,
+        target_user_id=2,
+        current_role="superadmin",
+        new_role="viewer",
+        superadmin_count=2,
+    )
+    assert not can_delete_user(
+        actor_user_id=1,
+        target_user_id=1,
+        target_role="superadmin",
+        superadmin_count=2,
+    )
+    assert not can_delete_user(
+        actor_user_id=1,
+        target_user_id=2,
+        target_role="superadmin",
+        superadmin_count=1,
+    )
+    assert can_delete_user(
+        actor_user_id=1,
+        target_user_id=2,
+        target_role="superadmin",
+        superadmin_count=2,
+    )
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,35 @@ def normalize_role(role: str | None) -> str:
     return role if role in VALID_ROLES else "viewer"
 
 
+def can_change_role(
+    *,
+    actor_user_id: int | None,
+    target_user_id: int | None,
+    current_role: str,
+    new_role: str,
+    superadmin_count: int,
+) -> bool:
+    if new_role not in VALID_ROLES:
+        return False
+    if current_role != "superadmin" or new_role == "superadmin":
+        return True
+    if actor_user_id is not None and actor_user_id == target_user_id:
+        return False
+    return superadmin_count > 1
+
+
+def can_delete_user(
+    *,
+    actor_user_id: int | None,
+    target_user_id: int | None,
+    target_role: str,
+    superadmin_count: int,
+) -> bool:
+    if actor_user_id is not None and actor_user_id == target_user_id:
+        return False
+    return target_role != "superadmin" or superadmin_count > 1
+
+
 def is_action_allowed(
     role: str | None,
     *,

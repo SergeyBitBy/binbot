@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -9,14 +10,16 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from app.bot.access import VALID_ROLES, can_change_role, can_delete_user
 from app.bot.keyboards.main_kb import get_back_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import AdminUser
 
 logger = logging.getLogger(__name__)
 router = Router()
+_admin_mutation_lock = asyncio.Lock()
 
 class AdminForm(StatesGroup):
     role = State()
@@ -32,6 +35,9 @@ async def cb_admins_list(call: CallbackQuery):
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(AdminUser))
         admins = res.scalars().all()
+        superadmin_count = await session.scalar(
+            select(func.count(AdminUser.id)).where(AdminUser.role == "superadmin")
+        )
 
     text = "👥 <b>СПИСОК АДМИНИСТРАТОРОВ БОТА</b>\n\n"
     buttons = []
@@ -40,12 +46,32 @@ async def cb_admins_list(call: CallbackQuery):
         role_icon = {"superadmin": "👑", "admin": "🛠", "viewer": "👁"}.get(a.role, "❓")
         text += f"• {role_icon} <b>{user_str}</b> | Роль: <code>{a.role}</code>\n"
         
-        if a.role != "superadmin":
-            next_role = "viewer" if a.role == "admin" else "admin"
-            buttons.append([InlineKeyboardButton(
-                text=f"🔄 Сделать {next_role}: {user_str}",
-                callback_data=f"adm_role_{a.id}_{next_role}",
-            )])
+        is_self = a.telegram_id is not None and a.telegram_id == call.from_user.id
+        role_buttons = []
+        for target_role, label in (
+            ("superadmin", "👑 Superadmin"),
+            ("admin", "🛠 Admin"),
+            ("viewer", "👁 Viewer"),
+        ):
+            if target_role != a.role and can_change_role(
+                actor_user_id=call.from_user.id,
+                target_user_id=a.telegram_id,
+                current_role=a.role,
+                new_role=target_role,
+                superadmin_count=superadmin_count or 0,
+            ):
+                role_buttons.append(InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"adm_role_{a.id}_{target_role}",
+                ))
+        if role_buttons:
+            buttons.append(role_buttons)
+        if not is_self and can_delete_user(
+            actor_user_id=call.from_user.id,
+            target_user_id=a.telegram_id,
+            target_role=a.role,
+            superadmin_count=superadmin_count or 0,
+        ):
             buttons.append([InlineKeyboardButton(text=f"❌ Удалить {user_str}", callback_data=f"adm_del_{a.id}")])
 
     buttons.append([InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="adm_add")])
@@ -64,6 +90,7 @@ async def cb_adm_add(call: CallbackQuery, state: FSMContext):
         "➕ <b>ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ</b>\n\nВыберите роль:"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👑 Superadmin", callback_data="adm_add_role_superadmin")],
         [InlineKeyboardButton(text="🛠 Admin", callback_data="adm_add_role_admin")],
         [InlineKeyboardButton(text="👁 Viewer", callback_data="adm_add_role_viewer")],
         [InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main")],
@@ -74,7 +101,7 @@ async def cb_adm_add(call: CallbackQuery, state: FSMContext):
 @router.callback_query(AdminForm.role, F.data.startswith("adm_add_role_"))
 async def cb_adm_add_role(call: CallbackQuery, state: FSMContext):
     role = call.data.removeprefix("adm_add_role_")
-    if role not in ("admin", "viewer"):
+    if role not in VALID_ROLES:
         await call.answer("Недопустимая роль", show_alert=True)
         return
     await state.update_data(new_user_role=role)
@@ -112,31 +139,62 @@ async def process_adm_input(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("adm_del_"))
 async def cb_adm_del(call: CallbackQuery):
     adm_id = int(call.data.split("_")[2])
-    async with AsyncSessionLocal() as session:
-        res = await session.execute(select(AdminUser).where(AdminUser.id == adm_id))
-        admin = res.scalar_one_or_none()
-        if admin:
-            await session.delete(admin)
-            await session.commit()
-            try:
-                await call.answer("Администратор удален", show_alert=True)
-            except Exception:
-                pass
+    async with _admin_mutation_lock:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(AdminUser).where(AdminUser.id == adm_id))
+            admin = res.scalar_one_or_none()
+            if admin:
+                superadmin_count = await session.scalar(
+                    select(func.count(AdminUser.id)).where(AdminUser.role == "superadmin")
+                )
+                if not can_delete_user(
+                    actor_user_id=call.from_user.id,
+                    target_user_id=admin.telegram_id,
+                    target_role=admin.role,
+                    superadmin_count=superadmin_count or 0,
+                ):
+                    await call.answer(
+                        "Нельзя удалить себя или последнего суперадминистратора",
+                        show_alert=True,
+                    )
+                    return
+                await session.delete(admin)
+                await session.commit()
+                try:
+                    await call.answer("Администратор удален", show_alert=True)
+                except Exception:
+                    pass
     await cb_admins_list(call)
 
 
 @router.callback_query(F.data.startswith("adm_role_"))
 async def cb_adm_role(call: CallbackQuery):
     _, _, admin_id, role = call.data.split("_", 3)
-    if role not in ("admin", "viewer"):
+    if role not in VALID_ROLES:
         await call.answer("Недопустимая роль", show_alert=True)
         return
-    async with AsyncSessionLocal() as session:
-        admin = await session.get(AdminUser, int(admin_id))
-        if not admin or admin.role == "superadmin":
-            await call.answer("Роль этого пользователя изменить нельзя", show_alert=True)
-            return
-        admin.role = role
-        await session.commit()
+    async with _admin_mutation_lock:
+        async with AsyncSessionLocal() as session:
+            admin = await session.get(AdminUser, int(admin_id))
+            if not admin:
+                await call.answer("Пользователь не найден", show_alert=True)
+                return
+            superadmin_count = await session.scalar(
+                select(func.count(AdminUser.id)).where(AdminUser.role == "superadmin")
+            )
+            if not can_change_role(
+                actor_user_id=call.from_user.id,
+                target_user_id=admin.telegram_id,
+                current_role=admin.role,
+                new_role=role,
+                superadmin_count=superadmin_count or 0,
+            ):
+                await call.answer(
+                    "Нельзя понизить себя или последнего суперадминистратора",
+                    show_alert=True,
+                )
+                return
+            admin.role = role
+            await session.commit()
     await call.answer(f"Новая роль: {role}", show_alert=True)
     await cb_admins_list(call)
