@@ -183,6 +183,9 @@ class NotificationService:
                     logger.warning("Notification delivery %s failed: %s", delivery.id, exc)
 
             touched = {event.id for _, event in deliveries}
+            # The session has autoflush disabled; persist delivery state before
+            # aggregating it into the parent outbox event.
+            await session.flush()
             for event_id in touched:
                 event = await session.get(NotificationOutbox, event_id)
                 states = list((await session.execute(
