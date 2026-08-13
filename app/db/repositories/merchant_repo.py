@@ -6,7 +6,13 @@ from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Advertisement, Contact, Merchant, ProfileAdvertisement, ProfileMerchant
+from app.db.models import (
+    Advertisement,
+    Contact,
+    Merchant,
+    ProfileAdvertisement,
+    ProfileMerchant,
+)
 from app.providers.binance.models import BinanceSearchItem
 from app.services.contact_extractor import ContactExtractor, ExtractedContact
 
@@ -109,10 +115,18 @@ class MerchantRepository:
         existing_ad = ad_res.scalar_one_or_none()
 
         is_new_or_updated_ad = False
-        pay_methods = [
-            {"payType": p.get("payType"), "payMethodName": p.get("payTypeStr")}
-            for p in adv_data.payMethods
-        ]
+        pay_methods = []
+        for method in adv_data.payMethods:
+            pay_type = method.get("payType") or method.get("identifier")
+            name = (
+                method.get("tradeMethodName")
+                or method.get("tradeMethodShortName")
+                or method.get("payTypeStr")
+                or method.get("identifier")
+                or method.get("payType")
+            )
+            if pay_type or name:
+                pay_methods.append({"payType": pay_type, "payMethodName": name})
 
         if not existing_ad:
             is_new_or_updated_ad = True

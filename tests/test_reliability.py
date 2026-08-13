@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -11,11 +14,12 @@ from app.db.models import (
     NotificationOutbox,
 )
 from app.db.repositories.profile_repo import ProfileRepository
-from app.providers.binance.models import BinanceSearchResponse
 from app.providers.binance.client import DetailFetchResult
+from app.providers.binance.models import BinanceSearchResponse
 from app.providers.binance.provider import BinanceP2PProvider, FetchResult
 from app.services.monitoring_service import MonitoringService
 from app.services.notification_service import NotificationService
+from app.services.sheets_service import GoogleSheetsService
 
 
 def _response(page: int, count: int, total: int = 3) -> BinanceSearchResponse:
@@ -82,6 +86,50 @@ def test_notification_html_escapes_external_values():
     assert "&lt;script&gt;" in text
     assert "&lt;b&gt;attacker&lt;/b&gt;" in text
     assert "A &amp; B" in text
+
+
+def test_new_contact_notification_contains_full_advertisement_details():
+    text = NotificationService._format({
+        "nickname": "Trader",
+        "user_no": "user-1",
+        "profile_name": "USDT BUY",
+        "asset": "USDT",
+        "fiat": "UAH",
+        "price": "46.50",
+        "min_amount": "4000",
+        "max_amount": "335000",
+        "month_order_count": 208,
+        "month_finish_rate": 0.986,
+        "pay_methods": ["Monobank (Card)", "PrivatBank"],
+        "remarks": "Новое описание объявления",
+        "auto_reply": "Новый автоответ",
+        "contacts": [{"type": "telegram", "value": "@trader"}],
+    }, "NEW_CONTACTS")
+    assert "46.50" in text
+    assert "4000 - 335000 UAH" in text
+    assert "208 (98.6%)" in text
+    assert "Monobank (Card), PrivatBank" in text
+    assert "Новое описание объявления" in text
+    assert "Новый автоответ" in text
+
+
+def test_sheets_dates_are_converted_from_utc_to_kyiv(monkeypatch):
+    monkeypatch.setattr("app.services.sheets_service.settings.timezone", "Europe/Kyiv")
+    merchant = SimpleNamespace(
+        user_no="u1",
+        nickname="Trader",
+        user_type="merchant",
+        month_order_count=1,
+        month_finish_rate=1.0,
+        remarks="",
+        first_seen_at=datetime(2026, 8, 13, 22, 14, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 8, 13, 22, 14),  # noqa: DTZ001 - SQLite returns naive UTC
+    )
+    columns = [{"key": "first_seen"}, {"key": "last_seen"}]
+    assert GoogleSheetsService()._build_row(merchant, [], columns) == [
+        "2026-08-14 01:14",
+        "2026-08-14 01:14",
+    ]
 
 
 @pytest.mark.asyncio

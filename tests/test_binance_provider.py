@@ -21,7 +21,11 @@ def test_binance_response_parsing():
                     "fiatUnit": "UAH",
                     "remarks": "Тестовая заметка",
                     "autoReplyMsg": None,
-                    "payMethods": [{"payType": "Monobank", "payTypeStr": "Monobank"}],
+                    "tradeMethods": [{
+                        "payType": "Monobank",
+                        "identifier": "Monobank",
+                        "tradeMethodName": "Monobank (Card)",
+                    }],
                 },
                 "advertiser": {
                     "userNo": "user123456",
@@ -42,5 +46,6 @@ def test_binance_response_parsing():
     item = parsed.data[0]
     assert item.adv.advNo == "112233445566"
     assert item.adv.price == Decimal("42.50")
+    assert item.adv.payMethods[0]["tradeMethodName"] == "Monobank (Card)"
     assert item.advertiser.userNo == "user123456"
     assert item.advertiser.nickName == "TestTrader"

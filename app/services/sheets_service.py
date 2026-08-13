@@ -1,8 +1,11 @@
 import asyncio
 import json
 import logging
+from datetime import timezone
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
 from sqlalchemy import select
 
 from app.config.settings import settings
@@ -205,8 +208,8 @@ class GoogleSheetsService:
             "finish_rate": f"{merchant.month_finish_rate * 100:.1f}%",
             "contacts": contacts_str,
             "remarks": (merchant.remarks or "")[:300],
-            "first_seen": merchant.first_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.first_seen_at else "",
-            "last_seen": merchant.last_seen_at.strftime("%Y-%m-%d %H:%M") if merchant.last_seen_at else "",
+            "first_seen": self._format_local_datetime(merchant.first_seen_at),
+            "last_seen": self._format_local_datetime(merchant.last_seen_at),
         }
 
         row = []
@@ -214,6 +217,16 @@ class GoogleSheetsService:
             k = col["key"]
             row.append(field_map.get(k, ""))
         return row
+
+    @staticmethod
+    def _format_local_datetime(value) -> str:
+        if value is None:
+            return ""
+        # SQLite returns UTC timestamps without tzinfo. Restore their meaning
+        # before converting them to the configured display timezone.
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d %H:%M")
 
     async def ensure_headers_exist(self):
         """Ensure row 1 contains active headers."""

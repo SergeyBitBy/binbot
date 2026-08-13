@@ -92,23 +92,35 @@ class NotificationService:
         link = f"https://p2p.binance.com/advertiserDetail?advertiserNo={esc(payload.get('user_no'))}"
         contacts = payload.get("contacts") or []
         contacts_text = "\n".join(
-            f"• <b>{esc(c.get('type', '')).upper()}</b>: <code>{esc(c.get('value'))}</code>" for c in contacts
+            f"• <b>{esc(c.get('type', '')).upper()}</b>: <code>{esc(c.get('value'))}</code>"
+            for c in contacts
         ) or "<i>Контакты не указаны</i>"
-        if event_type == "NEW_CONTACTS":
-            return (
-                "📞 <b>НОВЫЕ КОНТАКТЫ МЕРЧАНТА</b>\n\n"
-                f"👤 <a href='{link}'>{esc(payload.get('nickname') or 'Без ника')}</a>\n"
-                f"🆔 <code>{esc(payload.get('user_no'))}</code>\n"
-                f"📊 Профиль: {esc(payload.get('profile_name'))}\n\n{contacts_text}"
-            )
-        pay = ", ".join(esc(x) for x in payload.get("pay_methods") or []) or "Все способы оплаты"
+        pay = ", ".join(esc(x) for x in payload.get("pay_methods") or []) or "Не указаны"
+        title = "📞 <b>НОВЫЕ КОНТАКТЫ МЕРЧАНТА</b>" if event_type == "NEW_CONTACTS" else "🚨 <b>НОВЫЙ МЕРЧАНТ</b>"
+        contacts_title = "Новые контакты" if event_type == "NEW_CONTACTS" else "Контакты"
+
+        minimum = esc(payload.get("min_amount")) or "—"
+        maximum = esc(payload.get("max_amount")) or "—"
+        fiat = esc(payload.get("fiat"))
+        orders = payload.get("month_order_count")
+        finish_rate = payload.get("month_finish_rate")
+        stats_line = ""
+        if orders is not None or finish_rate is not None:
+            try:
+                rate_text = f"{float(finish_rate) * 100:.1f}%" if finish_rate is not None else "—"
+            except (TypeError, ValueError):
+                rate_text = esc(finish_rate) or "—"
+            stats_line = f"\n📈 <b>Ордеров/Месяц:</b> {esc(orders) or '—'} ({rate_text})"
+
         text = (
-            "🚨 <b>НОВЫЙ МЕРЧАНТ</b>\n\n"
+            f"{title}\n\n"
             f"👤 <a href='{link}'>{esc(payload.get('nickname') or 'Без ника')}</a>\n"
             f"🆔 <code>{esc(payload.get('user_no'))}</code>\n"
             f"📊 Профиль: {esc(payload.get('profile_name'))}\n"
-            f"💰 {esc(payload.get('asset'))}/{esc(payload.get('fiat'))}: <code>{esc(payload.get('price'))}</code>\n"
-            f"💳 {pay}\n\n📞 <b>Контакты:</b>\n{contacts_text}"
+            f"💱 <b>Пара:</b> {esc(payload.get('asset'))}/{fiat}\n"
+            f"💰 <b>Цена:</b> {esc(payload.get('price'))} | <b>Лимиты:</b> {minimum} - {maximum} {fiat}"
+            f"{stats_line}\n"
+            f"💳 <b>Оплата:</b> {pay}\n\n📞 <b>{contacts_title}:</b>\n{contacts_text}"
         )
         remarks = str(payload.get("remarks") or "").strip()
         reply = str(payload.get("auto_reply") or "").strip()

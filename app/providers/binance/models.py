@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class BinanceSearchRequest(BaseModel):
@@ -37,7 +37,13 @@ class BinanceAd(BaseModel):
     fiatUnit: str
     remarks: str | None = None
     autoReplyMsg: str | None = None
-    payMethods: list[dict] = Field(default_factory=list)
+    # Binance currently returns this collection as ``tradeMethods``. Keep the
+    # internal name for compatibility with the rest of the application and
+    # accept the legacy field as a fallback.
+    payMethods: list[dict] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("tradeMethods", "payMethods"),
+    )
 
 class BinanceSearchItem(BaseModel):
     adv: BinanceAd
