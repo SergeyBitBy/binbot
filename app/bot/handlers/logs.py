@@ -1,3 +1,4 @@
+import html
 import logging
 
 from aiogram import F, Router
@@ -28,7 +29,8 @@ async def cmd_view_logs(event: Message | CallbackQuery):
             lines = f.readlines()
             tail_lines = "".join(lines[-40:])
 
-        text = f"📝 <b>ПОСЛЕДНИЕ 40 СТРОК ЛОГА СИСТЕМЫ:</b>\n\n<pre>{tail_lines[-3500:]}</pre>"
+        safe_tail = html.escape(tail_lines[-3500:])
+        text = f"📝 <b>ПОСЛЕДНИЕ 40 СТРОК ЛОГА СИСТЕМЫ:</b>\n\n<pre>{safe_tail}</pre>"
         
         if isinstance(event, CallbackQuery):
             await event.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")

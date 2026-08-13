@@ -1,17 +1,18 @@
 import logging
-from datetime import timezone, timedelta
+from datetime import timezone
+from zoneinfo import ZoneInfo
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
-from app.bot.keyboards.main_kb import get_back_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import MonitoringProfile, ScanHistory
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-KYIV_TZ = timezone(timedelta(hours=3))
+KYIV_TZ = ZoneInfo(settings.timezone)
 
 @router.callback_query(F.data == "menu_scan_history")
 async def cb_scan_history(call: CallbackQuery):
@@ -44,12 +45,13 @@ async def cb_scan_history(call: CallbackQuery):
             else:
                 time_str = "N/A"
 
-            status_icon = "🟢" if s.status == "SUCCESS" else "🔴"
+            status_icon = "🟢" if s.status == "SUCCESS" else ("🟡" if s.status == "PARTIAL" else "🔴")
             text += (
                 f"{status_icon} <b>{p_name}</b> [{time_str}]\n"
                 f"   Объявлений: <code>{s.total_ads_found}</code> | Мерчантов: <code>{s.unique_merchants_found}</code> | "
                 f"Новых: <code>{s.new_merchants_count}</code>\n"
             )
+            text += f"   Страниц: <code>{s.pages_fetched}</code> | Время: <code>{(s.duration_ms or 0) / 1000:.1f}с</code> | Триггер: <code>{s.trigger}</code>\n"
             if s.error_message:
                 text += f"   ⚠️ <i>Ошибка: {s.error_message[:100]}</i>\n"
             text += "\n"

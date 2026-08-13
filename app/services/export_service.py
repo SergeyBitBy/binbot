@@ -1,14 +1,14 @@
 import csv
 import io
 import logging
-import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.config.settings import DATA_DIR
+from app.config.settings import DATA_DIR, settings
 from app.db.database import AsyncSessionLocal
 from app.db.models import Merchant
 
@@ -69,7 +69,21 @@ class ExportService:
         backup_file = backup_dir / f"bot_backup_{timestamp}.db"
 
         try:
-            shutil.copy2(db_file, backup_file)
+            temp_file = backup_file.with_suffix(".tmp")
+            source = sqlite3.connect(str(db_file))
+            destination = sqlite3.connect(str(temp_file))
+            try:
+                source.backup(destination)
+                check = destination.execute("PRAGMA integrity_check").fetchone()
+                if not check or check[0] != "ok":
+                    raise sqlite3.DatabaseError(f"integrity_check failed: {check}")
+            finally:
+                destination.close()
+                source.close()
+            temp_file.replace(backup_file)
+            backups = sorted(backup_dir.glob("bot_backup_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for old_backup in backups[settings.backup_retention_count:]:
+                old_backup.unlink()
             logger.info(f"Database backup created successfully: {backup_file}")
             return backup_file
         except Exception as e:

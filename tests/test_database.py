@@ -35,13 +35,13 @@ async def test_merchant_deduplication():
     async with async_session() as session:
         repo = MerchantRepository(session)
         # First insertion
-        m1, is_new1, contacts1, _ad1 = await repo.process_binance_item(item)
+        m1, is_new1, contacts1, _ad1, _ = await repo.process_binance_item(item)
         assert is_new1 is True
         assert len(contacts1) == 1
         assert contacts1[0].value == "@merchant_tg"
 
         # Second insertion (Same userNo) -> should deduplicate
-        m2, is_new2, contacts2, _ad2 = await repo.process_binance_item(item)
+        m2, is_new2, contacts2, _ad2, _ = await repo.process_binance_item(item)
         assert is_new2 is False
         assert len(contacts2) == 0
         assert m1.id == m2.id

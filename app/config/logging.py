@@ -1,7 +1,21 @@
+import gzip
 import logging
+import os
+import shutil
 import sys
+from logging.handlers import TimedRotatingFileHandler
 
 from app.config.settings import LOGS_DIR, settings
+
+
+def _gzip_namer(name: str) -> str:
+    return f"{name}.gz"
+
+
+def _gzip_rotator(source: str, destination: str) -> None:
+    with open(source, "rb") as source_file, gzip.open(destination, "wb") as target_file:
+        shutil.copyfileobj(source_file, target_file)
+    os.remove(source)
 
 
 def setup_logging():
@@ -9,9 +23,12 @@ def setup_logging():
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     
-    file_handler = logging.FileHandler(
-        LOGS_DIR / "bot.log", encoding="utf-8"
+    file_handler = TimedRotatingFileHandler(
+        LOGS_DIR / "bot.log", when="midnight", interval=1,
+        backupCount=settings.log_retention_days, encoding="utf-8", utc=True,
     )
+    file_handler.namer = _gzip_namer
+    file_handler.rotator = _gzip_rotator
     file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
     file_handler.setLevel(log_level)
     

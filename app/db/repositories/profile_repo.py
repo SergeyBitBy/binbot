@@ -1,6 +1,7 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import MonitoringProfile, ScanHistory
@@ -63,6 +64,57 @@ class ProfileRepository:
         if profile:
             profile.is_locked = is_locked
             await self.session.commit()
+
+    async def claim_for_scan(self, profile_id: int, *, force: bool = False, lease_seconds: int = 300) -> MonitoringProfile | None:
+        now = datetime.now(timezone.utc)
+        conditions = [
+            MonitoringProfile.id == profile_id,
+            MonitoringProfile.is_active.is_(True),
+            or_(MonitoringProfile.locked_until.is_(None), MonitoringProfile.locked_until < now),
+        ]
+        if not force:
+            conditions.append(or_(MonitoringProfile.next_scan_at.is_(None), MonitoringProfile.next_scan_at <= now))
+        result = await self.session.execute(
+            update(MonitoringProfile)
+            .where(*conditions)
+            .values(
+                is_locked=True,
+                locked_until=now + timedelta(seconds=lease_seconds),
+                last_scan_started_at=now,
+            )
+        )
+        if result.rowcount != 1:
+            await self.session.rollback()
+            return None
+        await self.session.commit()
+        return await self.get_by_id(profile_id)
+
+    async def release_after_scan(self, profile_id: int, interval_seconds: int) -> None:
+        now = datetime.now(timezone.utc)
+        await self.session.execute(
+            update(MonitoringProfile)
+            .where(MonitoringProfile.id == profile_id)
+            .values(
+                is_locked=False,
+                locked_until=None,
+                last_scan_finished_at=now,
+                next_scan_at=now + timedelta(seconds=max(10, interval_seconds)),
+            )
+        )
+        await self.session.commit()
+
+    async def get_due(self) -> list[MonitoringProfile]:
+        now = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            select(MonitoringProfile)
+            .where(
+                MonitoringProfile.is_active.is_(True),
+                or_(MonitoringProfile.next_scan_at.is_(None), MonitoringProfile.next_scan_at <= now),
+                or_(MonitoringProfile.locked_until.is_(None), MonitoringProfile.locked_until < now),
+            )
+            .order_by(MonitoringProfile.next_scan_at, MonitoringProfile.id)
+        )
+        return list(result.scalars().all())
 
     async def mark_baseline_completed(self, profile_id: int):
         profile = await self.get_by_id(profile_id)

@@ -3,7 +3,6 @@ from typing import Any, Awaitable, Callable, Dict
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from app.config.settings import settings
 from app.db.database import AsyncSessionLocal
 from app.db.repositories.audit_repo import AuditRepository
 
@@ -34,30 +33,39 @@ class AuthMiddleware(BaseMiddleware):
                 username = event.from_user.username if event.from_user else None
                 chat_id = event.message.chat.id if event.message and event.message.chat else None
 
-            logger.info(f"Incoming event from user_id={user_id}, username={username}, chat_id={chat_id}, text={text}")
-
-            clean_username = username.lower().lstrip("@") if username else ""
-            initial_admin = settings.initial_admin_username.lower().lstrip("@")
-            initial_chat = settings.initial_allowed_chat_id
-
-            # Allow initial admin by username or allowed chat_id or user_id
-            if (clean_username and clean_username == initial_admin) or (chat_id and chat_id == initial_chat) or (user_id and user_id == initial_chat):
-                data["is_authorized"] = True
-                return await handler(event, data)
+            logger.info("Incoming event user_id=%s chat_id=%s type=%s", user_id, chat_id, type(event).__name__)
 
             # Check DB authorization
             is_user_ok = False
             is_chat_ok = False
+            role = None
             try:
                 async with AsyncSessionLocal() as session:
                     repo = AuditRepository(session)
                     is_user_ok = await repo.is_authorized_user(user_id, username)
                     is_chat_ok = await repo.is_allowed_chat(chat_id) if chat_id else False
+                    role = await repo.get_user_role(user_id)
             except Exception as dbe:
                 logger.error(f"Error checking authorization in DB: {dbe}")
 
-            if is_user_ok or is_chat_ok:
+            is_private = isinstance(event, Message) and event.chat.type == "private"
+            if isinstance(event, CallbackQuery) and event.message:
+                is_private = event.message.chat.type == "private"
+            if is_user_ok and (is_private or is_chat_ok):
                 data["is_authorized"] = True
+                data["role"] = role or "admin"
+                callback_data = event.data if isinstance(event, CallbackQuery) else ""
+                command_text = text.split()[0].lower() if text else ""
+                superadmin_prefixes = (
+                    "adm_", "chat_", "merch_delete_", "merch_clear_all_",
+                    "prof_delete_", "menu_backup_db",
+                )
+                if callback_data.startswith(superadmin_prefixes) and data["role"] != "superadmin":
+                    await event.answer("⛔ Требуются права superadmin", show_alert=True)
+                    return None
+                if command_text in ("/backup", "/retry_notifications") and data["role"] != "superadmin":
+                    await event.answer("⛔ Требуются права superadmin")
+                    return None
                 return await handler(event, data)
 
             logger.warning(f"Unauthorized access attempt by user_id={user_id}, username={username}, chat_id={chat_id}")

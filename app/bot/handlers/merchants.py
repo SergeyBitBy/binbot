@@ -8,7 +8,6 @@ from app.bot.keyboards.main_kb import get_back_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.repositories.merchant_repo import MerchantRepository
 from app.bot.states.merchant_states import MerchantSearchForm
-from app.providers.binance.client import BinanceClient
 from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)

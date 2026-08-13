@@ -1,4 +1,3 @@
-import pytest
 from app.services.contact_extractor import ContactExtractor
 
 def test_extract_telegram_from_remarks():

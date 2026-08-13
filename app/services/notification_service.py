@@ -1,160 +1,221 @@
 import asyncio
+import html
 import logging
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, time, timedelta, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from sqlalchemy import select
 
+from app.config.settings import settings
 from app.db.database import AsyncSessionLocal
-from app.db.models import AllowedChat, Contact, Merchant, SystemSetting
+from app.db.models import (
+    AllowedChat,
+    NotificationDelivery,
+    NotificationOutbox,
+    SystemSetting,
+)
 
 logger = logging.getLogger(__name__)
 
-class NotificationService:
-    def __init__(self, bot: Optional[Bot] = None):
-        self.bot = bot
 
-    def set_bot(self, bot: Bot):
+class NotificationService:
+    def __init__(self, bot: Bot | None = None):
+        self.bot = bot
+        self._worker_task: asyncio.Task | None = None
+        self._stop = asyncio.Event()
+
+    def set_bot(self, bot: Bot) -> None:
         self.bot = bot
 
     @staticmethod
     async def is_quiet_hours() -> bool:
         async with AsyncSessionLocal() as session:
-            res_enabled = await session.execute(select(SystemSetting).where(SystemSetting.key == "quiet_hours_enabled"))
-            setting_enabled = res_enabled.scalar_one_or_none()
-            if not setting_enabled or setting_enabled.value.lower() != "true":
-                return False
+            values = dict((await session.execute(
+                select(SystemSetting.key, SystemSetting.value).where(
+                    SystemSetting.key.in_(["quiet_hours_enabled", "quiet_hours_start", "quiet_hours_end"])
+                )
+            )).all())
+        if values.get("quiet_hours_enabled", "false").lower() != "true":
+            return False
+        try:
+            now_time = datetime.now(ZoneInfo(settings.timezone)).time()
+            start = time.fromisoformat(values["quiet_hours_start"])
+            end = time.fromisoformat(values["quiet_hours_end"])
+            return start <= now_time <= end if start <= end else now_time >= start or now_time <= end
+        except (KeyError, ValueError) as exc:
+            logger.error("Invalid quiet-hours configuration: %s", exc)
+            return False
 
-            res_start = await session.execute(select(SystemSetting).where(SystemSetting.key == "quiet_hours_start"))
-            res_end = await session.execute(select(SystemSetting).where(SystemSetting.key == "quiet_hours_end"))
-            st_val = res_start.scalar_one_or_none()
-            end_val = res_end.scalar_one_or_none()
-            
-            if not st_val or not end_val:
-                return False
+    @staticmethod
+    async def enqueue(
+        session,
+        *,
+        event_type: str,
+        profile_id: int,
+        merchant_id: int,
+        payload: dict[str, Any],
+        deduplication_key: str,
+    ) -> None:
+        existing = await session.scalar(
+            select(NotificationOutbox.id).where(NotificationOutbox.deduplication_key == deduplication_key)
+        )
+        if existing:
+            return
+        now = datetime.now(timezone.utc)
+        event = NotificationOutbox(
+            event_type=event_type,
+            profile_id=profile_id,
+            merchant_id=merchant_id,
+            payload=payload,
+            deduplication_key=deduplication_key,
+            status="PENDING",
+            next_attempt_at=now,
+            created_at=now,
+        )
+        session.add(event)
+        await session.flush()
+        chat_ids = list((await session.execute(select(AllowedChat.chat_id))).scalars())
+        for chat_id in chat_ids:
+            session.add(NotificationDelivery(
+                outbox_id=event.id,
+                chat_id=chat_id,
+                status="PENDING",
+                next_attempt_at=now,
+            ))
 
-            try:
-                now_time = datetime.now().time()
-                start_time = datetime.strptime(st_val.value, "%H:%M").time()
-                end_time = datetime.strptime(end_val.value, "%H:%M").time()
+    @staticmethod
+    def _format(payload: dict[str, Any], event_type: str) -> str:
+        esc = lambda value: html.escape(str(value or ""), quote=True)
+        link = f"https://p2p.binance.com/advertiserDetail?advertiserNo={esc(payload.get('user_no'))}"
+        contacts = payload.get("contacts") or []
+        contacts_text = "\n".join(
+            f"• <b>{esc(c.get('type', '')).upper()}</b>: <code>{esc(c.get('value'))}</code>" for c in contacts
+        ) or "<i>Контакты не указаны</i>"
+        if event_type == "NEW_CONTACTS":
+            return (
+                "📞 <b>НОВЫЕ КОНТАКТЫ МЕРЧАНТА</b>\n\n"
+                f"👤 <a href='{link}'>{esc(payload.get('nickname') or 'Без ника')}</a>\n"
+                f"🆔 <code>{esc(payload.get('user_no'))}</code>\n"
+                f"📊 Профиль: {esc(payload.get('profile_name'))}\n\n{contacts_text}"
+            )
+        pay = ", ".join(esc(x) for x in payload.get("pay_methods") or []) or "Все способы оплаты"
+        text = (
+            "🚨 <b>НОВЫЙ МЕРЧАНТ</b>\n\n"
+            f"👤 <a href='{link}'>{esc(payload.get('nickname') or 'Без ника')}</a>\n"
+            f"🆔 <code>{esc(payload.get('user_no'))}</code>\n"
+            f"📊 Профиль: {esc(payload.get('profile_name'))}\n"
+            f"💰 {esc(payload.get('asset'))}/{esc(payload.get('fiat'))}: <code>{esc(payload.get('price'))}</code>\n"
+            f"💳 {pay}\n\n📞 <b>Контакты:</b>\n{contacts_text}"
+        )
+        remarks = str(payload.get("remarks") or "").strip()
+        reply = str(payload.get("auto_reply") or "").strip()
+        if remarks:
+            text += f"\n\n📝 <b>Описание:</b>\n<i>{esc(remarks[:600])}</i>"
+        if reply:
+            text += f"\n\n💬 <b>Автоответ:</b>\n<i>{esc(reply[:300])}</i>"
+        return text
 
-                if start_time <= end_time:
-                    return start_time <= now_time <= end_time
-                else:
-                    return now_time >= start_time or now_time <= end_time
-            except Exception as e:
-                logger.error(f"Error checking quiet hours: {e}")
-                return False
-
-    async def get_target_chat_ids(self) -> List[int]:
+    async def process_pending(self) -> None:
+        if not self.bot or await self.is_quiet_hours():
+            return
+        now = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as session:
-            res = await session.execute(select(AllowedChat.chat_id))
-            return list(res.scalars().all())
+            chat_ids = list((await session.execute(select(AllowedChat.chat_id))).scalars())
+            open_events = list((await session.execute(
+                select(NotificationOutbox.id).where(NotificationOutbox.status.in_(["PENDING", "RETRY"]))
+            )).scalars())
+            existing_pairs = set((await session.execute(
+                select(NotificationDelivery.outbox_id, NotificationDelivery.chat_id).where(
+                    NotificationDelivery.outbox_id.in_(open_events or [-1])
+                )
+            )).all())
+            for event_id in open_events:
+                for chat_id in chat_ids:
+                    if (event_id, chat_id) not in existing_pairs:
+                        session.add(NotificationDelivery(
+                            outbox_id=event_id,
+                            chat_id=chat_id,
+                            status="PENDING",
+                            next_attempt_at=now,
+                        ))
+            await session.flush()
+            deliveries = list((await session.execute(
+                select(NotificationDelivery, NotificationOutbox)
+                .join(NotificationOutbox, NotificationOutbox.id == NotificationDelivery.outbox_id)
+                .where(
+                    NotificationDelivery.status.in_(["PENDING", "RETRY"]),
+                    NotificationDelivery.next_attempt_at <= now,
+                    NotificationOutbox.status != "DEAD",
+                )
+                .order_by(NotificationDelivery.id)
+                .limit(50)
+            )).all())
 
-    async def notify_new_merchant(
-        self,
-        merchant: Merchant,
-        contacts: List[Contact],
-        profile_name: str,
-        asset: str,
-        fiat: str,
-        price: str,
-        remarks: Optional[str] = None,
-        auto_reply: Optional[str] = None,
-        min_amount: Optional[str] = None,
-        max_amount: Optional[str] = None,
-        pay_methods: Optional[List[str]] = None,
-    ):
-        if not self.bot:
-            logger.warning("NotificationService bot instance not attached.")
-            return
+            for delivery, event in deliveries:
+                try:
+                    await self.bot.send_message(
+                        chat_id=delivery.chat_id,
+                        text=self._format(event.payload, event.event_type),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    delivery.status = "SENT"
+                    delivery.sent_at = now
+                except asyncio.CancelledError:
+                    raise
+                except TelegramRetryAfter as exc:
+                    delivery.status = "RETRY"
+                    delivery.attempts += 1
+                    delivery.next_attempt_at = now + timedelta(seconds=exc.retry_after + 1)
+                    delivery.last_error = str(exc)[:500]
+                except Exception as exc:
+                    delivery.attempts += 1
+                    delivery.last_error = str(exc)[:500]
+                    if delivery.attempts >= settings.notification_max_attempts:
+                        delivery.status = "DEAD"
+                    else:
+                        delivery.status = "RETRY"
+                        delay = min(3600, 2 ** min(delivery.attempts, 10))
+                        delivery.next_attempt_at = now + timedelta(seconds=delay)
+                    logger.warning("Notification delivery %s failed: %s", delivery.id, exc)
 
-        if await NotificationService.is_quiet_hours():
-            logger.info("Quiet hours active. Suppressing Telegram notification.")
-            return
+            touched = {event.id for _, event in deliveries}
+            for event_id in touched:
+                event = await session.get(NotificationOutbox, event_id)
+                states = list((await session.execute(
+                    select(NotificationDelivery.status).where(NotificationDelivery.outbox_id == event_id)
+                )).scalars())
+                if states and all(state == "SENT" for state in states):
+                    event.status = "SENT"
+                    event.sent_at = now
+                elif states and all(state in ("SENT", "DEAD") for state in states):
+                    event.status = "DEAD"
+                else:
+                    event.status = "RETRY"
+            await session.commit()
 
-        chats = await self.get_target_chat_ids()
-        if not chats:
-            logger.warning("No allowed chats found for notifications.")
-            return
-
-        profile_link = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
-        
-        # Contacts List formatting
-        if contacts:
-            contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code>" for c in contacts])
-        else:
-            contacts_str = "<i>⚠️ Контакты не указаны в описании/никнейме</i>"
-
-        # Pay Methods formatting
-        pay_str = ", ".join(pay_methods) if pay_methods else "Все способы оплаты"
-
-        # Limits formatting
-        limits_str = ""
-        if min_amount or max_amount:
-            limits_str = f" | <b>Лимиты:</b> <code>{min_amount or '0'} - {max_amount or '∞'} {fiat}</code>"
-
-        text = (
-            f"🚨 <b>Новый мерчант</b>\n\n"
-            f"👤 <b>Никнейм:</b> <a href='{profile_link}'>{merchant.nickname or 'Без ника'}</a>\n"
-            f"🆔 <b>UserNo:</b> <code>{merchant.user_no}</code>\n"
-            f"📊 <b>Профиль:</b> {profile_name}\n"
-            f"💰 <b>Пара:</b> {asset}/{fiat} | <b>Цена:</b> <code>{price}</code>{limits_str}\n"
-            f"💳 <b>Оплата:</b> {pay_str}\n"
-            f"📈 <b>Ордеров/Месяц:</b> {merchant.month_order_count} ({merchant.month_finish_rate * 100:.1f}%)\n\n"
-            f"📞 <b>Извлеченные контакты:</b>\n{contacts_str}\n"
-        )
-
-        # Full Description / Remarks block
-        effective_remarks = remarks or merchant.remarks
-        if effective_remarks and effective_remarks.strip():
-            clean_remarks = effective_remarks.strip()[:600].replace("<", "&lt;").replace(">", "&gt;")
-            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>«{clean_remarks}»</i>\n"
-        else:
-            text += f"\n📝 <b>Условия / Описание объявления:</b>\n<i>(Не заполнены мерчантом на Binance P2P)</i>\n"
-
-        effective_auto_reply = auto_reply or merchant.auto_reply_msg
-        if effective_auto_reply and effective_auto_reply.strip():
-            clean_reply = effective_auto_reply.strip()[:300].replace("<", "&lt;").replace(">", "&gt;")
-            text += f"\n💬 <b>Автоответ сделки:</b>\n<i>«{clean_reply}»</i>\n"
-
-        for chat_id in chats:
+    async def run_worker(self) -> None:
+        self._stop.clear()
+        while not self._stop.is_set():
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Failed to send notification to chat {chat_id}: {e}")
-
-    async def notify_new_contacts(
-        self,
-        merchant: Merchant,
-        new_contacts: List[Contact],
-        profile_name: str,
-    ):
-        if not self.bot or not new_contacts:
-            return
-
-        if await NotificationService.is_quiet_hours():
-            return
-
-        chats = await self.get_target_chat_ids()
-        if not chats:
-            return
-
-        profile_link = f"https://p2p.binance.com/advertiserDetail?advertiserNo={merchant.user_no}"
-        contacts_str = "\n".join([f"• <b>{c.type.upper()}</b>: <code>{c.value}</code>" for c in new_contacts])
-
-        text = (
-            f"📞 <b>ОБНОВЛЕНИЕ КОНТАКТОВ МЕРЧАНТА!</b>\n\n"
-            f"👤 <b>Мерчант:</b> <a href='{profile_link}'>{merchant.nickname}</a>\n"
-            f"🆔 <b>UserNo:</b> <code>{merchant.user_no}</code>\n"
-            f"📊 <b>Профиль:</b> {profile_name}\n\n"
-            f"➕ <b>Новые контакты:</b>\n{contacts_str}\n"
-        )
-
-        for chat_id in chats:
+                await self.process_pending()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Unhandled notification worker error")
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Failed to send contact update to chat {chat_id}: {e}")
+                await asyncio.wait_for(self._stop.wait(), timeout=settings.notification_worker_interval_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+    def start(self) -> None:
+        if not self._worker_task or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self.run_worker(), name="notification-worker")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._worker_task:
+            await self._worker_task

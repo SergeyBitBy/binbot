@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import httpx
 
@@ -8,6 +9,13 @@ from app.config.settings import settings
 from app.providers.binance.exceptions import BinanceAPIError, BinanceNetworkError, BinanceRateLimitError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class DetailFetchResult:
+    success: bool
+    data: Optional[Dict[str, Any]] = None
+    error: str | None = None
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -57,7 +65,8 @@ class BinanceClient:
                     logger.warning(f"Rate limited by Binance P2P (429). Attempt {attempt}/{max_retries}")
                     if attempt == max_retries:
                         raise BinanceRateLimitError(429, "Rate limit exceeded")
-                    await asyncio.sleep(2.0 * attempt)
+                    retry_after = float(response.headers.get("Retry-After", 2.0 * attempt))
+                    await asyncio.sleep(retry_after + random.uniform(0, 0.5))
                 else:
                     logger.warning(f"Binance API returned HTTP {response.status_code}. Attempt {attempt}/{max_retries}")
                     if attempt == max_retries:
@@ -68,22 +77,49 @@ class BinanceClient:
                 if attempt == max_retries:
                     raise BinanceNetworkError(f"Network request failed: {e}")
                 await asyncio.sleep(1.5 * attempt)
+            except (ValueError, TypeError) as e:
+                logger.warning("Invalid Binance API response. Attempt %s/%s: %s", attempt, max_retries, e)
+                if attempt == max_retries:
+                    raise BinanceAPIError(200, f"Invalid JSON response: {e}") from e
+                await asyncio.sleep(attempt + random.uniform(0, 0.5))
         
         raise BinanceNetworkError("Max retries exceeded")
 
-    async def get_adv_detail(self, adv_no: str) -> Optional[Dict[str, Any]]:
+    async def get_adv_detail(self, adv_no: str) -> DetailFetchResult:
         """Fetch full advertisement detail including remarks and autoReplyMsg using public GET endpoint."""
         url = f"{self.detail_url}?channel=c2c&advNo={adv_no}&area=p2pZone"
         headers = self._get_headers()
-        try:
-            response = await self.client.get(url, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("success") and data.get("code") == "000000":
-                    return data.get("data")
-        except Exception as e:
-            logger.error(f"Error fetching ad detail for advNo {adv_no}: {e}")
-        return None
+        max_retries = settings.binance_max_retries
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await self.client.get(url, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("success") and data.get("code") == "000000":
+                        return DetailFetchResult(success=True, data=data.get("data"))
+                    error = f"business error {data.get('code')}: {data.get('message')}"
+                else:
+                    error = f"HTTP {response.status_code}"
+
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", attempt * 2))
+                    await asyncio.sleep(retry_after + random.uniform(0, 0.5))
+                elif response.status_code >= 500 and attempt < max_retries:
+                    await asyncio.sleep(attempt + random.uniform(0, 0.5))
+                else:
+                    return DetailFetchResult(success=False, error=error)
+            except asyncio.CancelledError:
+                raise
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                if attempt < max_retries:
+                    await asyncio.sleep(attempt * 1.5 + random.uniform(0, 0.5))
+                else:
+                    return DetailFetchResult(success=False, error=error)
+            except (ValueError, TypeError) as exc:
+                return DetailFetchResult(success=False, error=f"invalid response: {exc}")
+
+        return DetailFetchResult(success=False, error="maximum retries exceeded")
 
     async def close(self):
         await self.client.aclose()

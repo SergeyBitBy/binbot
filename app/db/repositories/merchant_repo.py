@@ -2,11 +2,11 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Advertisement, Contact, Merchant
+from app.db.models import Advertisement, Contact, Merchant, ProfileAdvertisement, ProfileMerchant
 from app.providers.binance.models import BinanceSearchItem
 from app.services.contact_extractor import ContactExtractor, ExtractedContact
 
@@ -35,8 +35,9 @@ class MerchantRepository:
         return res.scalar_one_or_none()
 
     async def process_binance_item(
-        self, item: BinanceSearchItem
-    ) -> Tuple[Merchant, bool, List[Contact], bool]:
+        self, item: BinanceSearchItem,
+        detail_checked_at: datetime | None = None,
+    ) -> Tuple[Merchant, bool, List[Contact], bool, Advertisement]:
         adv_data = item.adv
         advertiser_data = item.advertiser
 
@@ -130,6 +131,7 @@ class MerchantRepository:
                 first_seen_at=now,
                 last_seen_at=now,
                 is_active=True,
+                detail_checked_at=detail_checked_at,
             )
             self.session.add(ad)
         else:
@@ -143,9 +145,90 @@ class MerchantRepository:
             existing_ad.auto_reply = adv_data.autoReplyMsg
             existing_ad.last_seen_at = now
             existing_ad.is_active = True
+            if detail_checked_at is not None:
+                existing_ad.detail_checked_at = detail_checked_at
+            ad = existing_ad
 
         await self.session.flush()
-        return merchant, is_new_merchant, new_contacts, is_new_or_updated_ad
+        return merchant, is_new_merchant, new_contacts, is_new_or_updated_ad, ad
+
+    async def observe_for_profile(
+        self,
+        profile_id: int,
+        merchant_id: int,
+        advertisement_id: int,
+        seen_at: datetime,
+    ) -> tuple[bool, bool]:
+        pm_res = await self.session.execute(
+            select(ProfileMerchant).where(
+                ProfileMerchant.profile_id == profile_id,
+                ProfileMerchant.merchant_id == merchant_id,
+            )
+        )
+        pm = pm_res.scalar_one_or_none()
+        is_new_profile_merchant = pm is None
+        if pm is None:
+            self.session.add(ProfileMerchant(
+                profile_id=profile_id,
+                merchant_id=merchant_id,
+                first_seen_at=seen_at,
+                last_seen_at=seen_at,
+                is_active=True,
+            ))
+        else:
+            pm.last_seen_at = seen_at
+            pm.is_active = True
+
+        pa_res = await self.session.execute(
+            select(ProfileAdvertisement).where(
+                ProfileAdvertisement.profile_id == profile_id,
+                ProfileAdvertisement.advertisement_id == advertisement_id,
+            )
+        )
+        pa = pa_res.scalar_one_or_none()
+        is_new_profile_ad = pa is None
+        if pa is None:
+            self.session.add(ProfileAdvertisement(
+                profile_id=profile_id,
+                advertisement_id=advertisement_id,
+                first_seen_at=seen_at,
+                last_seen_at=seen_at,
+                is_active=True,
+            ))
+        else:
+            pa.last_seen_at = seen_at
+            pa.is_active = True
+
+        await self.session.flush()
+        return is_new_profile_merchant, is_new_profile_ad
+
+    async def deactivate_missing_for_profile(self, profile_id: int, scan_started_at: datetime) -> None:
+        await self.session.execute(
+            update(ProfileMerchant)
+            .where(ProfileMerchant.profile_id == profile_id, ProfileMerchant.last_seen_at < scan_started_at)
+            .values(is_active=False)
+        )
+        await self.session.execute(
+            update(ProfileAdvertisement)
+            .where(ProfileAdvertisement.profile_id == profile_id, ProfileAdvertisement.last_seen_at < scan_started_at)
+            .values(is_active=False)
+        )
+        await self.session.execute(
+            update(Merchant).values(
+                is_active=exists().where(
+                    ProfileMerchant.merchant_id == Merchant.id,
+                    ProfileMerchant.is_active.is_(True),
+                )
+            )
+        )
+        await self.session.execute(
+            update(Advertisement).values(
+                is_active=exists().where(
+                    ProfileAdvertisement.advertisement_id == Advertisement.id,
+                    ProfileAdvertisement.is_active.is_(True),
+                )
+            )
+        )
 
     async def get_all_merchants(
         self,
@@ -183,7 +266,7 @@ class MerchantRepository:
 
         if only_with_contacts:
             query = query.distinct()
-            count_query = count_query.distinct()
+            count_query = select(func.count(func.distinct(Merchant.id))).join(Merchant.contacts)
 
         total_res = await self.session.execute(count_query)
         total_count = total_res.scalar_one()

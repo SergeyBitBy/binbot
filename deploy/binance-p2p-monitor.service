@@ -12,7 +12,7 @@ ExecStart=/opt/binance-p2p-monitor/.venv/bin/python run.py
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=35
 EnvironmentFile=/opt/binance-p2p-monitor/.env
 
 [Install]

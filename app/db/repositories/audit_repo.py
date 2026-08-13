@@ -22,20 +22,32 @@ class AuditRepository:
         await self.session.commit()
 
     async def is_authorized_user(self, user_id: int | None, username: str | None) -> bool:
-        if username:
-            clean_username = username.lower().lstrip("@")
-            stmt = select(AdminUser).where(AdminUser.username == clean_username)
-            res = await self.session.execute(stmt)
-            if res.scalar_one_or_none():
-                return True
-
         if user_id:
             stmt = select(AdminUser).where(AdminUser.telegram_id == user_id)
             res = await self.session.execute(stmt)
             if res.scalar_one_or_none():
                 return True
 
+        # One-time bootstrap by username; bind the immutable Telegram ID immediately.
+        if username and user_id:
+            clean_username = username.lower().lstrip("@")
+            stmt = select(AdminUser).where(
+                AdminUser.username == clean_username,
+                AdminUser.telegram_id.is_(None),
+            )
+            res = await self.session.execute(stmt)
+            admin = res.scalar_one_or_none()
+            if admin:
+                admin.telegram_id = user_id
+                await self.session.commit()
+                return True
+
         return False
+
+    async def get_user_role(self, user_id: int | None) -> str | None:
+        if not user_id:
+            return None
+        return await self.session.scalar(select(AdminUser.role).where(AdminUser.telegram_id == user_id))
 
     async def is_allowed_chat(self, chat_id: int) -> bool:
         stmt = select(AllowedChat).where(AllowedChat.chat_id == chat_id)

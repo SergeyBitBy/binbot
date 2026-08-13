@@ -1,12 +1,36 @@
 import logging
+from datetime import datetime, timezone
+
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy import update
 
 from app.bot.keyboards.main_kb import get_main_menu_keyboard
 from app.services.health_service import HealthService
+from app.db.database import AsyncSessionLocal
+from app.db.models import NotificationDelivery, NotificationOutbox
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+@router.message(Command("retry_notifications"))
+async def retry_notifications(message: Message):
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as session:
+        deliveries = await session.execute(
+            update(NotificationDelivery)
+            .where(NotificationDelivery.status == "DEAD")
+            .values(status="RETRY", attempts=0, next_attempt_at=now, last_error=None)
+        )
+        await session.execute(
+            update(NotificationOutbox)
+            .where(NotificationOutbox.status == "DEAD")
+            .values(status="RETRY", attempts=0, next_attempt_at=now, last_error=None)
+        )
+        await session.commit()
+    await message.answer(f"Повторно поставлено в очередь: {deliveries.rowcount}")
 
 @router.callback_query(F.data == "menu_dashboard")
 async def cb_dashboard(call: CallbackQuery):
@@ -24,5 +48,6 @@ async def cb_dashboard(call: CallbackQuery):
         f"⚙️ <b>Активных Профилей:</b> <code>{metrics['active_profiles']}</code>\n"
         f"🔄 <b>Выполнено Сканирований:</b> <code>{metrics['total_scans']}</code>\n"
         f"⏱ <b>Последний скан:</b> {metrics['last_scan_time']} [{metrics['last_scan_status']}]\n"
+        f"⚠️ <b>Не доставлено уведомлений:</b> <code>{metrics['failed_deliveries']}</code>\n"
     )
     await call.message.edit_text(text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")

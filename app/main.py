@@ -14,8 +14,13 @@ from app.bot.handlers import (
 from app.services.monitoring_service import MonitoringService
 from app.services.notification_service import NotificationService
 from app.services.sheets_service import GoogleSheetsService
+from app.services.export_service import ExportService
 
 logger = logging.getLogger(__name__)
+
+
+async def create_backup_job() -> None:
+    await asyncio.to_thread(ExportService.create_database_backup)
 
 async def main():
     setup_logging()
@@ -55,7 +60,7 @@ async def main():
         except Exception as se:
             logger.warning(f"Could not send startup message to chat_id={settings.initial_allowed_chat_id}: {se}")
 
-    dp = Dispatcher()
+    dp = Dispatcher(monitoring_service=monitoring_service)
     dp.message.outer_middleware(AuthMiddleware())
     dp.callback_query.outer_middleware(AuthMiddleware())
 
@@ -72,25 +77,40 @@ async def main():
     dp.include_router(backup.router)
 
     # 4. Setup Scheduler for Periodic Monitoring & Daily Summary
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(timezone=settings.timezone)
     scheduler.add_job(
-        monitoring_service.scan_all_active_profiles,
+        monitoring_service.dispatch_due_profiles,
         "interval",
-        seconds=60,
+        seconds=settings.monitoring_dispatch_interval_seconds,
         id="p2p_monitoring_job",
         replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.add_job(
+        create_backup_job,
+        "cron",
+        hour=3,
+        minute=0,
+        id="daily_database_backup",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
     )
     scheduler.start()
-    logger.info("APScheduler started successfully. Periodic monitoring enabled (60s interval).")
+    logger.info("APScheduler started. Due-profile dispatcher interval=%ss.", settings.monitoring_dispatch_interval_seconds)
 
     # 5. Execute initial background scan after startup
-    asyncio.create_task(monitoring_service.scan_all_active_profiles())
+    notification_service.start()
+    await monitoring_service.dispatch_due_profiles()
 
     try:
         logger.info(f"Bot @{bot_info.username} is now POLLING for incoming messages...")
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
+        await monitoring_service.stop()
+        await notification_service.stop()
         await monitoring_service.provider.close()
         await bot.session.close()
         logger.info("Bot stopped gracefully.")

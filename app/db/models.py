@@ -78,6 +78,7 @@ class Advertisement(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    detail_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     merchant: Mapped["Merchant"] = relationship("Merchant", back_populates="advertisements")
 
@@ -97,6 +98,10 @@ class MonitoringProfile(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)  # True when scan in progress
     is_baseline_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_scan_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_scan_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
@@ -116,6 +121,12 @@ class ScanHistory(Base):
     new_contacts_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="RUNNING")
     error_message: Mapped[str | None] = mapped_column(Text)
+    trigger: Mapped[str] = mapped_column(String(16), default="scheduled")
+    expected_ads: Mapped[int | None] = mapped_column(Integer)
+    pages_fetched: Mapped[int] = mapped_column(Integer, default=0)
+    detail_success_count: Mapped[int] = mapped_column(Integer, default=0)
+    detail_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
 
     profile: Mapped["MonitoringProfile"] = relationship("MonitoringProfile", back_populates="scan_history")
 
@@ -152,3 +163,58 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     details: Mapped[str | None] = mapped_column(Text)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ProfileMerchant(Base):
+    __tablename__ = "profile_merchants"
+    __table_args__ = (UniqueConstraint("profile_id", "merchant_id", name="uq_profile_merchant"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(Integer, ForeignKey("monitoring_profiles.id", ondelete="CASCADE"), index=True)
+    merchant_id: Mapped[int] = mapped_column(Integer, ForeignKey("merchants.id", ondelete="CASCADE"), index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ProfileAdvertisement(Base):
+    __tablename__ = "profile_advertisements"
+    __table_args__ = (UniqueConstraint("profile_id", "advertisement_id", name="uq_profile_advertisement"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int] = mapped_column(Integer, ForeignKey("monitoring_profiles.id", ondelete="CASCADE"), index=True)
+    advertisement_id: Mapped[int] = mapped_column(Integer, ForeignKey("advertisements.id", ondelete="CASCADE"), index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class NotificationOutbox(Base):
+    __tablename__ = "notification_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    profile_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("monitoring_profiles.id", ondelete="SET NULL"))
+    merchant_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("merchants.id", ondelete="SET NULL"))
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    deduplication_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (UniqueConstraint("outbox_id", "chat_id", name="uq_outbox_chat"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    outbox_id: Mapped[int] = mapped_column(Integer, ForeignKey("notification_outbox.id", ondelete="CASCADE"), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

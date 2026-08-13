@@ -2,13 +2,13 @@ import os
 import time
 import paramiko
 
-HOST = "195.54.178.243"
+HOST = os.environ.get("DEPLOY_HOST", "")
 PORT = 22
-USER = "root"
-PASS = "Yp&uZY4!J$Fh"
-REMOTE_DIR = "/root/binbot"
+USER = os.environ.get("DEPLOY_USER", "root")
+PASS = os.environ.get("DEPLOY_PASSWORD")
+REMOTE_DIR = os.environ.get("DEPLOY_REMOTE_DIR", "/root/binbot")
 REPO_URL = "https://github.com/SergeyBitBy/binbot.git"
-BOT_TOKEN = "8625884127:AAEDtt3rYySHp2rIx1rvHrIPJauwEGHFe98"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 ENV_CONTENT = f"""# Telegram Bot Configuration
 BOT_TOKEN={BOT_TOKEN}
@@ -43,7 +43,7 @@ ExecStart=/root/binbot/.venv/bin/python run.py
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=35
 EnvironmentFile=/root/binbot/.env
 
 [Install]
@@ -51,6 +51,8 @@ WantedBy=multi-user.target
 """
 
 def execute_remote():
+    if not HOST or not BOT_TOKEN:
+        raise RuntimeError("DEPLOY_HOST and BOT_TOKEN environment variables are required")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     

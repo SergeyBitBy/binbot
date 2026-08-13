@@ -1,9 +1,9 @@
 import logging
-from sqlalchemy import event, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config.settings import settings
-from app.db.models import AdminUser, AllowedChat, Base, MonitoringProfile, SystemSetting
+from app.db.models import AdminUser, AllowedChat, Base, MonitoringProfile, ScanHistory, SystemSetting
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(
@@ -34,8 +35,12 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:
-        # 1. Reset all stale profile locks from previous runs/crashes
-        await session.execute(update(MonitoringProfile).values(is_locked=False))
+        # Leases expire on their own; never clear locks belonging to another live process.
+        await session.execute(
+            update(ScanHistory)
+            .where(ScanHistory.status == "RUNNING")
+            .values(status="ABORTED", finished_at=func.now(), error_message="Application stopped before scan completion")
+        )
         logger.info("Reset all profile locks to unlocked state.")
 
         # 2. Seed Initial Admin if provided
@@ -44,10 +49,18 @@ async def init_db():
             res = await session.execute(
                 select(AdminUser).where(AdminUser.username == username_clean)
             )
-            if not res.scalar_one_or_none():
-                admin = AdminUser(username=username_clean, role="superadmin")
+            admin = res.scalar_one_or_none()
+            bootstrap_user_id = settings.initial_allowed_chat_id if settings.initial_allowed_chat_id > 0 else None
+            if not admin:
+                admin = AdminUser(
+                    username=username_clean,
+                    telegram_id=bootstrap_user_id,
+                    role="superadmin",
+                )
                 session.add(admin)
                 logger.info(f"Seeded initial admin username: @{username_clean}")
+            elif admin.telegram_id is None and bootstrap_user_id:
+                admin.telegram_id = bootstrap_user_id
 
         # 3. Seed Initial Allowed Chat if provided
         if settings.initial_allowed_chat_id:
