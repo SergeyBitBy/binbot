@@ -9,31 +9,29 @@ logger = logging.getLogger(__name__)
 class ExtractedContact:
     type: str  # telegram, whatsapp, viber, phone, email, instagram
     value: str
-    raw_source: str  # remarks, auto_reply, nickname
+    raw_source: str  # remarks, auto_reply
 
     @property
     def raw_match(self) -> str:
         return self.value
 
 class ContactExtractor:
-    """Enhanced extractor to parse contacts from advertisement descriptions (remarks), auto-replies, and nicknames."""
+    """Enhanced extractor to parse contacts strictly from advertisement descriptions (remarks) and auto-replies."""
 
     # Regex Patterns with strict word boundaries and required separators
     PATTERNS = {
         "telegram": [
             # Direct links
-            r"(?:t\.me|telegram\.me)/(?:\+)?([a-zA-Z0-9_\+]{4,64})",
-            # Spaced or punctuated t g / т г / т.г / т_г / t.g
+            r"(?:https?://)?(?:t\.me|telegram\.me)/(?:\+)?([a-zA-Z0-9_\+]{4,64})",
+            # Spaced or punctuated t g / т г / т.г / т_г / t.g with explicit separator
             r"(?<![a-zA-Z0-9])(?:t|т)[\s._\-–]*(?:g|г)[:\s—\-–=]+@?([a-zA-Z0-9_]{4,32})(?![a-zA-Z0-9_])",
             # Keyphrase prefixes (TG, Telegram, связь, для зв'язку, личные сообщения, лс, личка, сотрудничество, etc.)
             r"(?<![a-zA-Z0-9])(?:tg|тг|телеграм|telegram|связь|зв[ʼ'\`]?язку|для\s+зв[ʼ'\`]?язку|для\s+связи|канал|чат|контакт|контакты|написать|пишите|инфо|info|личку|личка|лс|л\.с\.|личные\s+сообщения|личных\s+сообщениях|співпраця|сотрудничество)[:\s—\-–=.]+@?([a-zA-Z0-9_]{4,32})(?![a-zA-Z0-9_])",
-            # Direct @username handle
+            # Direct @username handle (at least 4 characters, not followed/preceded by letters)
             r"(?<![a-zA-Z0-9_])@([a-zA-Z0-9_]{4,32})(?![a-zA-Z0-9_])",
-            # Emoji-bounded handle (e.g. 📎 handle 📎, 🤝 handle, 📲 handle)
-            r"(?:📎|📩|📱|💬|✈️|📲|👉|🤙|🤝|👤|➡️|🔗|🔹|🔸|⚡)[:\s—\-–=]*@?([a-zA-Z0-9_]{4,32})(?=\s*(?:📎|📩|📱|💬|✈️|📲|👉|🤙|🤝|👤|➡️|🔗|🔹|🔸|⚡|\s|\.|\,|$))",
         ],
         "whatsapp": [
-            r"(?:wa\.me|api\.whatsapp\.com/send\?phone=)(\d{10,15})",
+            r"(?:https?://)?(?:wa\.me|api\.whatsapp\.com/send\?phone=)(\d{10,15})",
             r"(?<![a-zA-Z0-9])(?:wa|whatsapp|ватсап|ватцап|вацап)[:\s—\-–=]+\+?(\d{10,15})",
         ],
         "viber": [
@@ -45,10 +43,12 @@ class ContactExtractor:
         ],
         "instagram": [
             r"(?<![a-zA-Z0-9])(?:inst|instagram|инстаграм|инста)[:\s—\-–=]+@?([a-zA-Z0-9._]{3,30})(?![a-zA-Z0-9])",
-            r"(?:instagram\.com|instagr\.am)/([a-zA-Z0-9._]{3,30})",
+            r"(?:https?://)?(?:instagram\.com|instagr\.am)/([a-zA-Z0-9._]{3,30})",
         ],
         "phone": [
-            # International format with +
+            # Explicit phone labels: тел: +..., phone: +..., tel: +...
+            r"(?<![a-zA-Z0-9])(?:тел|телефон|phone|tel|номер)[:\s—\-–=]+(\+?\d{1,4}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9})",
+            # International format starting with + and country code
             r"(\+\d{1,4}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9})",
             # Local Ukrainian numbers: 0971234567, 093 123 45 67, 050-123-4567, 380971234567
             r"(?<!\d)((?:380|0)\d{2}[-.\s]?\d{3}[-.\s]?\d{2}[-.\s]?\d{2})(?!\d)",
@@ -62,6 +62,12 @@ class ContactExtractor:
         "bank", "card", "pay", "order", "buyer", "seller", "crypto", "change",
         "privatbank", "monobank", "a-bank", "abank", "vlasnyirakhunok",
         "instant", "sepa", "revolut", "wise", "garant", "escrow",
+        "instructions", "instrucciones", "welcome", "leave", "thank",
+        "thanks", "merch", "merchant", "trading", "exchange", "account",
+        "partner", "compro", "vendo", "transfer", "transfers", "payment",
+        "payments", "trusted", "only", "solo", "communication", "every",
+        "professional", "please", "ready", "service", "terms", "condition",
+        "conditions", "notice", "autopilot", "system", "automated",
     }
 
     @classmethod
@@ -79,11 +85,11 @@ class ContactExtractor:
                 for match in re.finditer(pattern, clean_text, re.IGNORECASE):
                     val = (match.group(1) if match.lastindex else match.group(0)).strip()
                     # Strip punctuation from ends
-                    val = val.strip(".,;:!? '\"")
+                    val = val.strip(".,;:!? '\"()[]{}<>")
 
                     # Normalization
                     if c_type in ("telegram", "instagram"):
-                        val = val.lstrip("@").strip(".,;:!? '\"")
+                        val = val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
                         if len(val) < 3 or val.lower() in cls.TG_BLACKLIST or val.isdigit():
                             continue
                         if c_type == "telegram":
@@ -99,7 +105,7 @@ class ContactExtractor:
                             digits = f"38{digits}"  # Normalize local UA 0XX... to 380XX...
                         val = f"+{digits}" if not digits.startswith("+") else digits
                     elif c_type == "email":
-                        val = val.lower().strip(".,;:!? '\"")
+                        val = val.lower().strip(".,;:!? '\"()[]{}<>")
 
                     key = (c_type, val.lower())
                     if key not in seen_values:
@@ -115,26 +121,19 @@ class ContactExtractor:
         remarks: str = "",
         auto_reply: str = "",
     ) -> List[ExtractedContact]:
-        """Extract contacts prioritize advertisement description (remarks) & auto reply, then nickname."""
+        """Extract contacts strictly from advertisement description (remarks) & auto reply. Nicknames are ignored."""
         all_contacts: List[ExtractedContact] = []
         seen_values: Set[Tuple[str, str]] = set()
 
-        # Primary Search: Advertisement Remarks/Description
+        # 1. Primary Search: Advertisement Remarks/Description
         for c in cls.extract_from_text(remarks, source_label="remarks"):
             key = (c.type, c.value.lower())
             if key not in seen_values:
                 seen_values.add(key)
                 all_contacts.append(c)
 
-        # Secondary Search: Auto Reply Message
+        # 2. Secondary Search: Auto Reply Message
         for c in cls.extract_from_text(auto_reply, source_label="auto_reply"):
-            key = (c.type, c.value.lower())
-            if key not in seen_values:
-                seen_values.add(key)
-                all_contacts.append(c)
-
-        # Fallback / Supplemental Search: Merchant Nickname
-        for c in cls.extract_from_text(nickname, source_label="nickname"):
             key = (c.type, c.value.lower())
             if key not in seen_values:
                 seen_values.add(key)

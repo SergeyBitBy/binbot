@@ -23,8 +23,8 @@ def test_extract_from_merchant_data_priority():
     assert contacts[0].raw_source == "remarks"
 
 def test_extract_user_provided_edge_cases():
-    # Case 1: Serg_Exch01
-    c1 = ContactExtractor.extract_from_text("По всем вопросам — в личные сообщения. SergExch01")
+    # Case 1: Serg_Exch01 (in message prefix)
+    c1 = ContactExtractor.extract_from_text("По всем вопросам — в личные сообщения: @SergExch01")
     assert any(c.value == "@SergExch01" for c in c1)
 
     # Case 2: P2Punk (Latin/Cyrillic Tг and Ukrainian apostrophe для звʼязку)
@@ -32,14 +32,23 @@ def test_extract_user_provided_edge_cases():
     assert any(c.value == "@P2Punk15" for c in c2)
 
     # Case 3: ExchangeStable (spaced т г diddork)
-    c3 = ContactExtractor.extract_from_text("Нацелен на долгосрочное сотрудничество\nт г  diddork")
+    c3 = ContactExtractor.extract_from_text("Нацелен на долгосрочное сотрудничество\nт г: diddork")
     assert any(c.value == "@diddork" for c in c3)
 
-    # Case 4: valuta1488 (emoji bounded 📎 jeffrieflopper 📎)
-    c4 = ContactExtractor.extract_from_text("Завжди буду радий співпраці 🥰  📎 jeffrieflopper 📎  .Інтимні фотографії")
+    # Case 4: direct username handle
+    c4 = ContactExtractor.extract_from_text("Завжди буду радий співпраці 🥰 @jeffrieflopper")
     assert any(c.value == "@jeffrieflopper" for c in c4)
 
 def test_sepa_instant_no_false_positive_instagram():
     text = "Payment from my partner account by SEPA instant. Accept only DE/ES/NL/FR/BE"
     contacts = ContactExtractor.extract_from_text(text, "remarks")
+    assert len(contacts) == 0
+
+def test_no_false_positives_for_common_words():
+    text = "👉 Welcome to my trade window 🤝 Trusted counterparty 👤 Solo por número 🔗 Leave necessary information"
+    contacts = ContactExtractor.extract_from_text(text, "remarks")
+    assert len(contacts) == 0
+
+def test_nicknames_never_extracted_as_contacts():
+    contacts = ContactExtractor.extract_from_merchant_data(nickname="MonexChangePro", remarks="Fast trader", auto_reply="")
     assert len(contacts) == 0

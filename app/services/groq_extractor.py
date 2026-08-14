@@ -11,17 +11,15 @@ from app.services.contact_extractor import ExtractedContact, ContactExtractor
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert contact information extraction system specialized in Binance P2P trader profiles and advertisement terms.
-Your goal is to accurately extract all direct communication contacts (Telegram, Phone, WhatsApp, Viber, Instagram, Email).
+SYSTEM_PROMPT = """You are an expert contact information extraction system specialized in Binance P2P trader advertisements.
+Your goal is to accurately extract ONLY direct communication contacts (Telegram, Phone, WhatsApp, Viber, Instagram, Email) that are explicitly provided by the trader.
 
-Domain Knowledge & Context:
-1. Telegram is the primary communication channel on P2P markets. Traders often write handles using shorthand:
-   - 'тг', 'т.г.', 'т г', 'tg', 't.g', 'телеграм', 'telegram', 'телеграмм', 'связь', 'для зв'язку', 'звʼязку', 'лс', 'в лс', 'в личку', 'в личные сообщения', 'PM' followed by or preceded by a handle.
-   - Handles enclosed in emojis (e.g. '📎 handle 📎', '✈️ handle', '🤝 handle') or written as contact signatures.
-2. Standardize all Telegram handles with a leading '@' (e.g. '@username').
-3. Phone, WhatsApp, Viber: normalize to international format with leading '+' and no spaces (e.g. '+573128318338', '+380971234567').
-4. DO NOT extract banking words (e.g. 'SEPA instant', 'Wise', 'Monobank', 'IBAN'), general phrases ('Message me', 'Online 24/7'), or company registration codes as usernames.
-5. If a handle appears as a contact handle after phrases like 'в личные сообщения <handle>' or 'пишите <handle>' or 'Tг <handle>', extract it as telegram.
+CRITICAL EXTRACTION RULES:
+1. ONLY extract contacts explicitly provided in the advertisement terms or auto-reply message.
+2. DO NOT extract or assume usernames from merchant nicknames, terms of trade, bank names, payment methods (e.g. 'SEPA instant', 'Revolut', 'Wise', 'Bizum'), or instructions (e.g. 'Welcome', 'Leave info', 'Only trade').
+3. Standardize Telegram handles with a leading '@' (e.g. '@username').
+4. Normalize Phone, WhatsApp, Viber numbers to international format with leading '+' (e.g. '+380971234567', '+573128318338').
+5. If no explicit communication contacts are provided, return an empty array.
 
 Output Schema:
 You MUST respond ONLY with a JSON object:
@@ -55,7 +53,7 @@ class GroqContactExtractor:
         keywords = [
             "tg", "тг", "телеграм", "telegram", "телеграмм", "viber", "вайбер",
             "whats", "ватсап", "вацап", "связь", "зв'яз", "звʼяз", "личк", "лс",
-            "pm", "inst", "инст", "phone", "тел", "contact", "контакт"
+            "pm", "phone", "тел", "contact", "контакт"
         ]
         # Match whole words only
         for k in keywords:
@@ -76,7 +74,7 @@ class GroqContactExtractor:
             "model": model_name,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Extract all communication contacts from this trader's data:\n\n{text_content}"},
+                {"role": "user", "content": f"Extract explicit communication contacts from this advertisement text:\n\n{text_content}"},
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.0,
@@ -96,13 +94,13 @@ class GroqContactExtractor:
             seen = set()
             for item in raw_contacts:
                 c_type = str(item.get("type", "telegram")).lower().strip()
-                c_val = str(item.get("value", "")).strip(".,;:!? '\"")
+                c_val = str(item.get("value", "")).strip(".,;:!? '\"()[]{}<>")
                 if not c_val:
                     continue
 
                 if c_type == "telegram":
-                    c_val = c_val.lstrip("@").strip(".,;:!? '\"")
-                    if len(c_val) < 3 or c_val.lower() in ("instant", "sepa", "bank", "trade", "wise"):
+                    c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
+                    if len(c_val) < 3 or c_val.lower() in ContactExtractor.TG_BLACKLIST:
                         continue
                     if "t.me" not in c_val:
                         c_val = f"@{c_val}"
@@ -112,8 +110,8 @@ class GroqContactExtractor:
                         continue
                     c_val = f"+{digits}"
                 elif c_type == "instagram":
-                    c_val = c_val.lstrip("@").strip(".,;:!? '\"")
-                    if len(c_val) < 3 or c_val.lower() in ("instant", "sepa", "bank", "trade", "wise"):
+                    c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
+                    if len(c_val) < 3 or c_val.lower() in ContactExtractor.TG_BLACKLIST:
                         continue
                 elif c_type == "email":
                     c_val = c_val.lower().strip()
@@ -142,18 +140,18 @@ class GroqContactExtractor:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> List[ExtractedContact]:
-        """Extract contacts using Groq LLM inference with circuit breaker and regex fallback."""
+        """Extract contacts strictly from advertisement text & auto-reply."""
         global _70B_RATE_LIMITED_UNTIL
         effective_key = api_key or self.api_key
         effective_model = model or self.model or "llama-3.1-8b-instant"
 
-        # 1. Fast heuristic pre-filtering
-        combined_text = f"{nickname} {remarks} {auto_reply}".strip()
+        # 1. Fast heuristic pre-filtering on advertisement text & auto reply only
+        combined_text = f"{remarks} {auto_reply}".strip()
         if not self.has_potential_contacts(combined_text):
             return []
 
         if not effective_key:
-            return ContactExtractor.extract_from_merchant_data(nickname=nickname, remarks=remarks, auto_reply=auto_reply)
+            return ContactExtractor.extract_from_merchant_data(remarks=remarks, auto_reply=auto_reply)
 
         # 2. Check 70B circuit breaker
         target_model = effective_model
@@ -161,7 +159,7 @@ class GroqContactExtractor:
         if "70b" in target_model.lower() and _70B_RATE_LIMITED_UNTIL and now < _70B_RATE_LIMITED_UNTIL:
             target_model = "llama-3.1-8b-instant"
 
-        text_content = f"Merchant Nickname: {nickname or 'N/A'}\n"
+        text_content = ""
         if remarks:
             text_content += f"Terms / Remarks:\n{remarks}\n"
         if auto_reply:
@@ -182,7 +180,7 @@ class GroqContactExtractor:
             logger.warning(f"Groq AI request failed ({e}), falling back to regex extractor.")
 
         # 3. Final Fallback to local regex extractor
-        return ContactExtractor.extract_from_merchant_data(nickname=nickname, remarks=remarks, auto_reply=auto_reply)
+        return ContactExtractor.extract_from_merchant_data(remarks=remarks, auto_reply=auto_reply)
 
     async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
