@@ -38,3 +38,8 @@ def test_extract_user_provided_edge_cases():
     # Case 4: valuta1488 (emoji bounded 📎 jeffrieflopper 📎)
     c4 = ContactExtractor.extract_from_text("Завжди буду радий співпраці 🥰  📎 jeffrieflopper 📎  .Інтимні фотографії")
     assert any(c.value == "@jeffrieflopper" for c in c4)
+
+def test_sepa_instant_no_false_positive_instagram():
+    text = "Payment from my partner account by SEPA instant. Accept only DE/ES/NL/FR/BE"
+    contacts = ContactExtractor.extract_from_text(text, "remarks")
+    assert len(contacts) == 0

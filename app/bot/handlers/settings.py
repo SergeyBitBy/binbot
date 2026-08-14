@@ -653,23 +653,25 @@ async def cb_run_sheets_export_do(call: CallbackQuery):
             pass
         return
 
-    total_exported = 0
+    export_tasks = []
     async with AsyncSessionLocal() as session:
         p_repo = ProfileRepository(session)
         m_repo = MerchantRepository(session)
         profiles = await p_repo.get_all()
         all_merchants, _ = await m_repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
-
-        # 1. Overwrite General Worksheet
         all_pairs = [(m, m.contacts) for m in all_merchants]
-        await sheets_service.overwrite_profile_merchants(all_pairs, profile_name="Общий")
-        total_exported += len(all_pairs)
 
-        # 2. Overwrite each Profile's Worksheet
         for p in profiles:
             p_merchants = await m_repo.get_merchants_by_profile_id(p.id, only_with_contacts=only_contacts)
             p_pairs = [(m, m.contacts) for m in p_merchants]
-            await sheets_service.overwrite_profile_merchants(p_pairs, profile_name=p.name)
+            export_tasks.append((p.name, p_pairs))
+
+    # 1. Overwrite General Worksheet
+    await sheets_service.overwrite_profile_merchants(all_pairs, profile_name="Общий")
+
+    # 2. Overwrite each Profile's Worksheet
+    for prof_name, p_pairs in export_tasks:
+        await sheets_service.overwrite_profile_merchants(p_pairs, profile_name=prof_name)
 
     try:
         await call.answer(f"✅ Экспорт завершен! Обновлены листы для {len(profiles)} профилей.", show_alert=True)

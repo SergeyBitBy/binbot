@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import httpx
 
@@ -32,8 +33,11 @@ You MUST respond ONLY with a JSON object:
 If no contacts are found, return {"contacts": []}.
 """
 
+# Global circuit breaker state for 70B rate limits
+_70B_RATE_LIMITED_UNTIL: Optional[datetime] = None
+
 class GroqContactExtractor:
-    """Ultra-fast, multilingual AI contact extractor powered by Groq LPUs with smart caching, pre-filtering and failover."""
+    """Ultra-fast, multilingual AI contact extractor powered by Groq LPUs with smart circuit breaker, pre-filtering and failover."""
 
     def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant"):
         self.api_key = api_key
@@ -46,21 +50,24 @@ class GroqContactExtractor:
         if not text or len(text.strip()) < 3:
             return False
         lower = text.lower()
-        if "@" in lower or "t.me" in lower or "wa.me" in lower or "viber://" in lower:
+        if "@" in lower or "t.me" in lower or "wa.me" in lower or "viber://" in lower or "instagram.com" in lower:
             return True
         keywords = [
             "tg", "тг", "телеграм", "telegram", "телеграмм", "viber", "вайбер",
             "whats", "ватсап", "вацап", "связь", "зв'яз", "звʼяз", "личк", "лс",
             "pm", "inst", "инст", "phone", "тел", "contact", "контакт"
         ]
-        if any(k in lower for k in keywords):
-            return True
-        # Check for sequences of at least 7 digits (phone numbers)
-        if re.search(r"\+?\d[\d\s\-\(\)]{6,}\d", text):
+        # Match whole words only
+        for k in keywords:
+            if re.search(rf"\b{k}\b", lower):
+                return True
+        # Check for sequences of at least 8 digits (phone numbers)
+        if re.search(r"\+?\d[\d\s\-\(\)]{7,}\d", text):
             return True
         return False
 
     async def _query_groq_api(self, client: httpx.AsyncClient, effective_key: str, model_name: str, text_content: str) -> Optional[List[ExtractedContact]]:
+        global _70B_RATE_LIMITED_UNTIL
         headers = {
             "Authorization": f"Bearer {effective_key}",
             "Content-Type": "application/json",
@@ -89,12 +96,14 @@ class GroqContactExtractor:
             seen = set()
             for item in raw_contacts:
                 c_type = str(item.get("type", "telegram")).lower().strip()
-                c_val = str(item.get("value", "")).strip()
+                c_val = str(item.get("value", "")).strip(".,;:!? '\"")
                 if not c_val:
                     continue
 
                 if c_type == "telegram":
-                    c_val = c_val.lstrip("@").strip()
+                    c_val = c_val.lstrip("@").strip(".,;:!? '\"")
+                    if len(c_val) < 3 or c_val.lower() in ("instant", "sepa", "bank", "trade", "wise"):
+                        continue
                     if "t.me" not in c_val:
                         c_val = f"@{c_val}"
                 elif c_type in ("phone", "whatsapp", "viber"):
@@ -102,6 +111,10 @@ class GroqContactExtractor:
                     if len(digits) < 8 or len(digits) > 16:
                         continue
                     c_val = f"+{digits}"
+                elif c_type == "instagram":
+                    c_val = c_val.lstrip("@").strip(".,;:!? '\"")
+                    if len(c_val) < 3 or c_val.lower() in ("instant", "sepa", "bank", "trade", "wise"):
+                        continue
                 elif c_type == "email":
                     c_val = c_val.lower().strip()
 
@@ -112,6 +125,11 @@ class GroqContactExtractor:
 
             logger.debug(f"Groq AI ({model_name}) extracted {len(contacts)} contacts in {duration_ms}ms.")
             return contacts
+        elif resp.status_code == 429:
+            if "70b" in model_name.lower():
+                _70B_RATE_LIMITED_UNTIL = datetime.now(timezone.utc) + timedelta(minutes=30)
+                logger.warning(f"Groq 70B rate limit hit (429). Circuit breaker active for 30 minutes.")
+            return None
         else:
             logger.warning(f"Groq API error ({resp.status_code}) on {model_name}: {resp.text[:150]}")
             return None
@@ -124,17 +142,24 @@ class GroqContactExtractor:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> List[ExtractedContact]:
-        """Extract contacts using Groq LLM inference with fast pre-filtering and automatic regex fallback."""
+        """Extract contacts using Groq LLM inference with circuit breaker and regex fallback."""
+        global _70B_RATE_LIMITED_UNTIL
         effective_key = api_key or self.api_key
         effective_model = model or self.model or "llama-3.1-8b-instant"
 
-        # Combined text for fast heuristic pre-filtering
+        # 1. Fast heuristic pre-filtering
         combined_text = f"{nickname} {remarks} {auto_reply}".strip()
         if not self.has_potential_contacts(combined_text):
             return []
 
         if not effective_key:
             return ContactExtractor.extract_from_merchant_data(nickname=nickname, remarks=remarks, auto_reply=auto_reply)
+
+        # 2. Check 70B circuit breaker
+        target_model = effective_model
+        now = datetime.now(timezone.utc)
+        if "70b" in target_model.lower() and _70B_RATE_LIMITED_UNTIL and now < _70B_RATE_LIMITED_UNTIL:
+            target_model = "llama-3.1-8b-instant"
 
         text_content = f"Merchant Nickname: {nickname or 'N/A'}\n"
         if remarks:
@@ -144,14 +169,12 @@ class GroqContactExtractor:
 
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
-                # 1. Primary Model Query
-                result = await self._query_groq_api(client, effective_key, effective_model, text_content)
+                result = await self._query_groq_api(client, effective_key, target_model, text_content)
                 if result is not None:
                     return result
 
-                # 2. Automatic Failover to llama-3.1-8b-instant if primary model hit rate limits
-                if "8b" not in effective_model.lower():
-                    logger.info("Failover to llama-3.1-8b-instant...")
+                # Failover to 8B if primary 70B failed
+                if "8b" not in target_model.lower():
                     result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content)
                     if result_8b is not None:
                         return result_8b
