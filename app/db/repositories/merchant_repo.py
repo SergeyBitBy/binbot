@@ -109,6 +109,7 @@ class MerchantRepository:
                 is_active=True,
             )
             self.session.add(merchant)
+            await self.session.flush()
             self._merchants_cache[advertiser_data.userNo] = merchant
         else:
             merchant = existing_merchant
