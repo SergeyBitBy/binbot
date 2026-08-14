@@ -35,11 +35,10 @@ If no contacts are found, return {"contacts": []}.
 class GroqContactExtractor:
     """Ultra-fast, multilingual AI contact extractor powered by Groq LPUs with smart caching, pre-filtering and failover."""
 
-    def __init__(self, api_key: str = "", model: str = "llama-3.3-70b-versatile"):
+    def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant"):
         self.api_key = api_key
         self.model = model
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
-        self._regex_extractor = ContactExtractor()
 
     @staticmethod
     def has_potential_contacts(text: str) -> bool:
@@ -129,14 +128,13 @@ class GroqContactExtractor:
         effective_key = api_key or self.api_key
         effective_model = model or self.model or "llama-3.1-8b-instant"
 
-        # Combined text for analysis
+        # Combined text for fast heuristic pre-filtering
         combined_text = f"{nickname} {remarks} {auto_reply}".strip()
         if not self.has_potential_contacts(combined_text):
             return []
 
         if not effective_key:
-            # Fallback to regex extractor immediately if no key
-            return self._regex_extractor.extract_all(remarks=remarks, auto_reply=auto_reply, nickname=nickname)
+            return ContactExtractor.extract_from_merchant_data(nickname=nickname, remarks=remarks, auto_reply=auto_reply)
 
         text_content = f"Merchant Nickname: {nickname or 'N/A'}\n"
         if remarks:
@@ -145,7 +143,7 @@ class GroqContactExtractor:
             text_content += f"Auto-Reply Message:\n{auto_reply}\n"
 
         try:
-            async with httpx.AsyncClient(timeout=4.0) as client:
+            async with httpx.AsyncClient(timeout=3.0) as client:
                 # 1. Primary Model Query
                 result = await self._query_groq_api(client, effective_key, effective_model, text_content)
                 if result is not None:
@@ -161,7 +159,7 @@ class GroqContactExtractor:
             logger.warning(f"Groq AI request failed ({e}), falling back to regex extractor.")
 
         # 3. Final Fallback to local regex extractor
-        return self._regex_extractor.extract_all(remarks=remarks, auto_reply=auto_reply, nickname=nickname)
+        return ContactExtractor.extract_from_merchant_data(nickname=nickname, remarks=remarks, auto_reply=auto_reply)
 
     async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
