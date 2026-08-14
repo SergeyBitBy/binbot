@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -20,6 +21,18 @@ from app.services.contact_extractor import ContactExtractor, ExtractedContact
 from app.services.groq_extractor import GroqContactExtractor
 
 logger = logging.getLogger(__name__)
+
+def _normalize_contact_key(c_type: str, c_val: str) -> str:
+    """Normalize contact type and value for robust deduplication."""
+    t = str(c_type).lower().strip()
+    v = str(c_val).lower().strip()
+    if t in ("phone", "whatsapp", "viber"):
+        digits = re.sub(r"\D", "", v)
+        v = f"+{digits}"
+    elif t == "telegram":
+        v = v.lstrip("@").strip()
+        v = f"@{v}"
+    return f"{t}:{v}"
 
 class MerchantRepository:
     def __init__(self, session: AsyncSession):
@@ -91,11 +104,13 @@ class MerchantRepository:
             merchant.last_seen_at = now
             merchant.is_active = True
 
-        # Fetch all existing contacts from DB to prevent UNIQUE constraint collisions
+        # Fetch all existing contacts from DB to prevent duplicate insertions
         c_stmt = select(Contact).where(Contact.merchant_id == merchant.id)
         c_res = await self.session.execute(c_stmt)
         all_existing_contacts = c_res.scalars().all()
-        existing_contacts_map = {f"{c.type.lower()}:{c.value.lower().strip()}": c for c in all_existing_contacts}
+        existing_contacts_map = {
+            _normalize_contact_key(c.type, c.value): c for c in all_existing_contacts
+        }
 
         # Extract Contacts: Groq AI if enabled, otherwise regex fallback
         groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
@@ -119,8 +134,8 @@ class MerchantRepository:
 
         for ext in extracted:
             val_clean = ext.value.strip()
-            key = f"{ext.type.lower()}:{val_clean.lower()}"
-            if key not in existing_contacts_map:
+            norm_key = _normalize_contact_key(ext.type, val_clean)
+            if norm_key not in existing_contacts_map:
                 contact = Contact(
                     merchant_id=merchant.id,
                     type=ext.type,
@@ -130,7 +145,7 @@ class MerchantRepository:
                 )
                 self.session.add(contact)
                 new_contacts.append(contact)
-                existing_contacts_map[key] = contact
+                existing_contacts_map[norm_key] = contact
 
         # Process Advertisement
         ad_stmt = select(Advertisement).where(Advertisement.adv_no == adv_data.advNo)

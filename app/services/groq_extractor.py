@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import List, Optional
 import httpx
@@ -17,7 +18,7 @@ Domain Knowledge & Context:
    - 'тг', 'т.г.', 'т г', 'tg', 't.g', 'телеграм', 'telegram', 'телеграмм', 'связь', 'для зв'язку', 'звʼязку', 'лс', 'в лс', 'в личку', 'в личные сообщения', 'PM' followed by or preceded by a handle.
    - Handles enclosed in emojis (e.g. '📎 handle 📎', '✈️ handle', '🤝 handle') or written as contact signatures.
 2. Standardize all Telegram handles with a leading '@' (e.g. '@username').
-3. Phone, WhatsApp, Viber: normalize to international format if possible (e.g. '+380...').
+3. Phone, WhatsApp, Viber: normalize to international format with leading '+' and no spaces (e.g. '+573128318338', '+380971234567').
 4. DO NOT extract banking words (e.g. 'SEPA instant', 'Wise', 'Monobank', 'IBAN'), general phrases ('Message me', 'Online 24/7'), or company registration codes as usernames.
 5. If a handle appears as a contact handle after phrases like 'в личные сообщения <handle>' or 'пишите <handle>' or 'Tг <handle>', extract it as telegram.
 
@@ -47,7 +48,7 @@ class GroqContactExtractor:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> List[ExtractedContact]:
-        """Extract contacts using Groq LLM inference."""
+        """Extract contacts using Groq LLM inference with strict normalization."""
         effective_key = api_key or self.api_key
         effective_model = model or self.model
 
@@ -97,11 +98,20 @@ class GroqContactExtractor:
                         if not c_val:
                             continue
 
-                        # Ensure telegram starts with @
-                        if c_type == "telegram" and not c_val.startswith("@") and not "t.me" in c_val:
-                            c_val = f"@{c_val}"
+                        # Strict normalization
+                        if c_type == "telegram":
+                            c_val = c_val.lstrip("@").strip()
+                            if "t.me" not in c_val:
+                                c_val = f"@{c_val}"
+                        elif c_type in ("phone", "whatsapp", "viber"):
+                            digits = re.sub(r"\D", "", c_val)
+                            if len(digits) < 8 or len(digits) > 16:
+                                continue
+                            c_val = f"+{digits}"
+                        elif c_type == "email":
+                            c_val = c_val.lower().strip()
 
-                        key = (c_type, c_val)
+                        key = (c_type, c_val.lower())
                         if key not in seen:
                             seen.add(key)
                             contacts.append(ExtractedContact(type=c_type, value=c_val, raw_source="groq_ai"))
