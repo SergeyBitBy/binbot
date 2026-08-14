@@ -153,7 +153,8 @@ class NotificationService:
                             status="PENDING",
                             next_attempt_at=now,
                         ))
-            await session.flush()
+            await session.commit()
+
             deliveries = list((await session.execute(
                 select(NotificationDelivery, NotificationOutbox)
                 .join(NotificationOutbox, NotificationOutbox.id == NotificationDelivery.outbox_id)
@@ -175,14 +176,16 @@ class NotificationService:
                         disable_web_page_preview=True,
                     )
                     delivery.status = "SENT"
-                    delivery.sent_at = now
+                    delivery.sent_at = datetime.now(timezone.utc)
+                    await session.commit()
                 except asyncio.CancelledError:
                     raise
                 except TelegramRetryAfter as exc:
                     delivery.status = "RETRY"
                     delivery.attempts += 1
-                    delivery.next_attempt_at = now + timedelta(seconds=exc.retry_after + 1)
+                    delivery.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=exc.retry_after + 1)
                     delivery.last_error = str(exc)[:500]
+                    await session.commit()
                 except Exception as exc:
                     delivery.attempts += 1
                     delivery.last_error = str(exc)[:500]
@@ -191,21 +194,22 @@ class NotificationService:
                     else:
                         delivery.status = "RETRY"
                         delay = min(3600, 2 ** min(delivery.attempts, 10))
-                        delivery.next_attempt_at = now + timedelta(seconds=delay)
+                        delivery.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    await session.commit()
                     logger.warning("Notification delivery %s failed: %s", delivery.id, exc)
 
+            # Update parent outbox status
             touched = {event.id for _, event in deliveries}
-            # The session has autoflush disabled; persist delivery state before
-            # aggregating it into the parent outbox event.
-            await session.flush()
             for event_id in touched:
                 event = await session.get(NotificationOutbox, event_id)
+                if not event:
+                    continue
                 states = list((await session.execute(
                     select(NotificationDelivery.status).where(NotificationDelivery.outbox_id == event_id)
                 )).scalars())
                 if states and all(state == "SENT" for state in states):
                     event.status = "SENT"
-                    event.sent_at = now
+                    event.sent_at = datetime.now(timezone.utc)
                 elif states and all(state in ("SENT", "DEAD") for state in states):
                     event.status = "DEAD"
                 else:
