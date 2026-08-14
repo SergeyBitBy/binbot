@@ -337,6 +337,22 @@ class MerchantRepository:
         )
         return merchants
 
+    async def get_merchants_by_profile_id(
+        self, profile_id: int, only_with_contacts: bool = False
+    ) -> List[Merchant]:
+        """Fetch all merchants observed for a specific monitoring profile."""
+        query = (
+            select(Merchant)
+            .join(ProfileMerchant, ProfileMerchant.merchant_id == Merchant.id)
+            .where(ProfileMerchant.profile_id == profile_id)
+            .options(selectinload(Merchant.contacts), selectinload(Merchant.advertisements))
+            .order_by(Merchant.last_seen_at.desc())
+        )
+        if only_with_contacts:
+            query = query.join(Merchant.contacts).distinct()
+        res = await self.session.execute(query)
+        return list(res.scalars().all())
+
     async def add_manual_contact(self, merchant_id: int, contact_type: str, contact_value: str) -> Contact:
         now = datetime.now(timezone.utc)
         contact = Contact(

@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
+from app.db.repositories.profile_repo import ProfileRepository
 from app.services.sheets_service import GoogleSheetsService, DEFAULT_COLUMNS_CONFIG
 from app.services.groq_extractor import GroqContactExtractor
 
@@ -290,7 +291,8 @@ async def cb_google_sheets_menu(call: CallbackQuery):
         f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
         f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
         f"🔄 <b>Авто-Экспорт:</b> {sheets_auto_status}\n"
-        f"🎯 <b>Фильтр Авто-Экспорта:</b> {filter_status}\n"
+        f"🎯 <b>Фильтр Авто-Экспорта:</b> {filter_status}\n\n"
+        "<i>💡 Данные каждого профиля автоматически сохраняются на отдельный лист с названием профиля.</i>"
     )
 
     btn_auto = "🔄 Авто-Экспорт: 🟢 ВКЛ" if sheets_auto_is_on else "🔄 Авто-Экспорт: 🔴 ВЫКЛ"
@@ -620,9 +622,13 @@ async def cb_run_sheets_prompt(call: CallbackQuery):
             pass
         return
 
-    text = "📊 <b>ЭКСПОРТ ДАННЫХ В GOOGLE SHEETS</b>\n\nВыберите режим экспорта:"
+    text = (
+        "📊 <b>ЭКСПОРТ ДАННЫХ В GOOGLE SHEETS</b>\n\n"
+        "Данные каждого профиля будут выгружены на его собственный лист в таблице.\n\n"
+        "Выберите режим экспорта:"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Экспортировать всех (Обновить таблицу)", callback_data="run_google_sheets_all")],
+        [InlineKeyboardButton(text="📊 Экспортировать все профили (по отдельным листам)", callback_data="run_google_sheets_all")],
         [InlineKeyboardButton(text="📞 Экспортировать только с контактами", callback_data="run_google_sheets_contacts")],
         [InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_google_sheets")],
     ])
@@ -634,7 +640,7 @@ async def cb_run_sheets_export_do(call: CallbackQuery):
     only_contacts = (target == "contacts")
 
     try:
-        await call.answer("📊 Экспорт в Google Таблицы запущен...", show_alert=True)
+        await call.answer("📊 Экспорт профилей в Google Таблицу запущен...", show_alert=True)
     except Exception:
         pass
 
@@ -647,15 +653,26 @@ async def cb_run_sheets_export_do(call: CallbackQuery):
             pass
         return
 
+    total_exported = 0
     async with AsyncSessionLocal() as session:
-        repo = MerchantRepository(session)
-        merchants, _ = await repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
+        p_repo = ProfileRepository(session)
+        m_repo = MerchantRepository(session)
+        profiles = await p_repo.get_all()
+        all_merchants, _ = await m_repo.get_all_merchants(limit=1000, only_with_contacts=only_contacts)
 
-    pairs = [(m, m.contacts) for m in merchants]
-    await sheets_service.overwrite_all_merchants(pairs)
+        # 1. Overwrite General Worksheet
+        all_pairs = [(m, m.contacts) for m in all_merchants]
+        await sheets_service.overwrite_profile_merchants(all_pairs, profile_name="Общий")
+        total_exported += len(all_pairs)
+
+        # 2. Overwrite each Profile's Worksheet
+        for p in profiles:
+            p_merchants = await m_repo.get_merchants_by_profile_id(p.id, only_with_contacts=only_contacts)
+            p_pairs = [(m, m.contacts) for m in p_merchants]
+            await sheets_service.overwrite_profile_merchants(p_pairs, profile_name=p.name)
 
     try:
-        await call.answer(f"✅ Успешно экспортировано {len(pairs)} мерчантов!", show_alert=True)
+        await call.answer(f"✅ Экспорт завершен! Обновлены листы для {len(profiles)} профилей.", show_alert=True)
     except Exception:
         pass
     await cb_google_sheets_menu(call)

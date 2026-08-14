@@ -19,8 +19,10 @@ from app.bot.keyboards.main_kb import (
 )
 from app.bot.states.profile_states import ProfileEditForm, ProfileForm
 from app.db.database import AsyncSessionLocal, database_write_lock
+from app.db.repositories.merchant_repo import MerchantRepository
 from app.db.repositories.profile_repo import ProfileRepository
 from app.services.monitoring_service import MonitoringService
+from app.services.sheets_service import GoogleSheetsService
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -58,6 +60,13 @@ async def cb_profile_view(call: CallbackQuery, role: str = "viewer"):
     baseline = "Завершена (Отслеживание новых мерчантов 🟢)" if p.is_baseline_completed else "Ожидает первого сканирования ⏳"
     pay_types_str = ", ".join(p.pay_types) if p.pay_types else "Все способы оплаты"
 
+    tt_display = {
+        "BUY": "🟢 BUY (Покупка)",
+        "SELL": "🔴 SELL (Продажа)",
+        "ALL": "🔄 ВСЕ (BUY + SELL)",
+        "BOTH": "🔄 ВСЕ (BUY + SELL)",
+    }.get(p.trade_type, p.trade_type)
+
     text = (
         f"⚙️ <b>ПРОФИЛЬ МОНИТОРИНГА: {p.name}</b>\n\n"
         f"Статус: {status}\n"
@@ -65,14 +74,14 @@ async def cb_profile_view(call: CallbackQuery, role: str = "viewer"):
         f"Фильтр мерчантов: {merchant_filter}\n\n"
         f"🪙 <b>Ассет:</b> <code>{p.asset}</code>\n"
         f"💵 <b>Фиат:</b> <code>{p.fiat}</code>\n"
-        f"🔄 <b>Тип сделки:</b> <code>{p.trade_type}</code>\n"
+        f"🔄 <b>Направление:</b> <b>{tt_display}</b>\n"
         f"💳 <b>Способы оплаты:</b> {pay_types_str}\n"
         f"⏱ <b>Интервал сканирования:</b> <code>{p.scan_interval_seconds} сек</code>\n"
     )
 
     await call.message.edit_text(
         text,
-        reply_markup=get_profile_detail_keyboard(p.id, p.is_active, p.merchant_check, role),
+        reply_markup=get_profile_detail_keyboard(p.id, p.is_active, p.merchant_check, trade_type=p.trade_type, role=role),
         parse_mode="HTML",
     )
 
@@ -104,6 +113,45 @@ async def cb_profile_check_toggle(call: CallbackQuery, role: str = "admin"):
 
     await cb_profile_view(call, role)
 
+@router.callback_query(F.data.startswith("prof_tradetype_"))
+async def cb_profile_tradetype_cycle(call: CallbackQuery, role: str = "admin"):
+    prof_id = int(call.data.split("_")[2])
+    cycle_map = {"BUY": "SELL", "SELL": "ALL", "ALL": "BUY", "BOTH": "BUY"}
+
+    async with AsyncSessionLocal() as session:
+        repo = ProfileRepository(session)
+        p = await repo.get_by_id(prof_id)
+        if p:
+            p.trade_type = cycle_map.get(p.trade_type, "BUY")
+            await session.commit()
+            await safe_answer(call, f"Направление изменено на: {p.trade_type}", show_alert=True)
+
+    await cb_profile_view(call, role)
+
+@router.callback_query(F.data.startswith("prof_export_sheet_"))
+async def cb_profile_export_sheet(call: CallbackQuery):
+    prof_id = int(call.data.split("_")[3])
+    sheets_service = GoogleSheetsService()
+    await sheets_service.initialize()
+    if not sheets_service.is_configured():
+        await safe_answer(call, "⚠️ Google Sheets не настроен или отсутствует service_account.json", show_alert=True)
+        return
+
+    await safe_answer(call, "📊 Экспорт профиля в Google Sheets запущен...", show_alert=True)
+
+    async with AsyncSessionLocal() as session:
+        p_repo = ProfileRepository(session)
+        m_repo = MerchantRepository(session)
+        p = await p_repo.get_by_id(prof_id)
+        if not p:
+            return
+        merchants = await m_repo.get_merchants_by_profile_id(prof_id)
+
+    pairs = [(m, m.contacts) for m in merchants]
+    await sheets_service.overwrite_profile_merchants(pairs, profile_name=p.name)
+
+    await safe_answer(call, f"✅ Экспортировано {len(pairs)} мерчантов на лист «{p.name}»!", show_alert=True)
+
 # Edit Scan Interval
 @router.callback_query(F.data.startswith("prof_interval_"))
 async def cb_profile_edit_interval(call: CallbackQuery, state: FSMContext):
@@ -119,14 +167,13 @@ async def cb_profile_edit_interval(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(text, reply_markup=get_wizard_nav_keyboard(), parse_mode="HTML")
 
 @router.message(ProfileEditForm.interval)
-async def process_profile_edit_interval(message: Message, state: FSMContext):
+async def process_profile_new_interval(message: Message, state: FSMContext, role: str = "admin"):
     try:
         new_interval = int(message.text.strip())
         if new_interval < 10:
             new_interval = 10
     except ValueError:
-        await message.answer("⚠️ Пожалуйста, введите целое число секунд (например: 60).", reply_markup=get_wizard_nav_keyboard())
-        return
+        new_interval = 60
 
     data = await state.get_data()
     prof_id = data.get("edit_prof_id")
@@ -139,8 +186,10 @@ async def process_profile_edit_interval(message: Message, state: FSMContext):
             p.scan_interval_seconds = new_interval
             await session.commit()
 
-    await message.answer(f"✅ <b>Интервал сканирования успешно обновлен на `{new_interval}` сек!</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+    text = f"✅ <b>Интервал сканирования профиля изменен на {new_interval} сек.</b>"
+    await message.answer(text, reply_markup=get_back_menu_keyboard(callback_data=f"prof_view_{prof_id}"), parse_mode="HTML")
 
+# Manage Payment Methods (PayTypes)
 @router.callback_query(F.data.startswith("prof_paytypes_"))
 async def cb_profile_paytypes(call: CallbackQuery):
     prof_id = int(call.data.split("_")[2])
@@ -251,15 +300,18 @@ async def process_prof_fiat(message: Message, state: FSMContext):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="ПОКУПКА (BUY)", callback_data="type_BUY"),
-            InlineKeyboardButton(text="ПРОДАЖА (SELL)", callback_data="type_SELL"),
+            InlineKeyboardButton(text="🟢 ПОКУПКА (BUY)", callback_data="type_BUY"),
+            InlineKeyboardButton(text="🔴 ПРОДАЖА (SELL)", callback_data="type_SELL"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 ВСЕ (BUY + SELL)", callback_data="type_ALL"),
         ],
         [
             InlineKeyboardButton(text="◀️ Назад", callback_data="prof_step3"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="prof_cancel"),
         ]
     ])
-    await message.answer("➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 4/5)</b>\n\nВыберите направление сделки (BUY/SELL):", reply_markup=kb, parse_mode="HTML")
+    await message.answer("➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 4/5)</b>\n\nВыберите направление сделки:", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data == "prof_step3")
 async def cb_prof_back_to_fiat(call: CallbackQuery, state: FSMContext):
@@ -283,15 +335,18 @@ async def cb_prof_back_to_trade_type(call: CallbackQuery, state: FSMContext):
     await state.set_state(ProfileForm.trade_type)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="ПОКУПКА (BUY)", callback_data="type_BUY"),
-            InlineKeyboardButton(text="ПРОДАЖА (SELL)", callback_data="type_SELL"),
+            InlineKeyboardButton(text="🟢 ПОКУПКА (BUY)", callback_data="type_BUY"),
+            InlineKeyboardButton(text="🔴 ПРОДАЖА (SELL)", callback_data="type_SELL"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 ВСЕ (BUY + SELL)", callback_data="type_ALL"),
         ],
         [
             InlineKeyboardButton(text="◀️ Назад", callback_data="prof_step3"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="prof_cancel"),
         ]
     ])
-    await call.message.edit_text("➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 4/5)</b>\n\nВыберите направление сделки (BUY/SELL):", reply_markup=kb, parse_mode="HTML")
+    await call.message.edit_text("➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 4/5)</b>\n\nВыберите направление сделки:", reply_markup=kb, parse_mode="HTML")
 
 @router.message(ProfileForm.scan_interval)
 async def process_prof_interval(
@@ -319,21 +374,14 @@ async def process_prof_interval(
             )
 
     await state.clear()
-    monitoring_enabled = await monitoring_service.is_global_monitoring_enabled()
-    if monitoring_enabled and profile.is_active:
-        monitoring_service.submit_scan(profile.id, trigger="profile_created", force=True)
-        scan_status = " Первое сканирование запущено."
-    else:
-        scan_status = " Глобальный мониторинг выключен — сканирование пока не запущено."
+    
+    tt_str = "🔄 ВСЕ (BUY + SELL)" if profile.trade_type == "ALL" else profile.trade_type
 
-    if created:
-        logger.info("Created monitoring profile id=%s name=%s", profile.id, profile.name)
-        text = f"🎉 <b>Профиль успешно создан!</b>{scan_status}"
-    else:
-        logger.info("Profile creation repeated for existing id=%s name=%s", profile.id, profile.name)
-        text = f"ℹ️ <b>Профиль с таким названием уже существует.</b>{scan_status}"
-    await message.answer(
-        text,
-        reply_markup=get_main_menu_keyboard(role=role),
-        parse_mode="HTML",
+    text = (
+        f"✅ <b>ПРОФИЛЬ МОНИТОРИНГА УСПЕШНО СОЗДАН!</b>\n\n"
+        f"📌 <b>Название:</b> {profile.name}\n"
+        f"🪙 <b>Пара:</b> {profile.asset}/{profile.fiat}\n"
+        f"🔄 <b>Направление:</b> {tt_str}\n"
+        f"⏱ <b>Интервал:</b> {profile.scan_interval_seconds} сек\n"
     )
+    await message.answer(text, reply_markup=get_main_menu_keyboard(monitoring_enabled=True), parse_mode="HTML")

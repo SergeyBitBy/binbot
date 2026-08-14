@@ -42,9 +42,10 @@ def get_profiles_keyboard(profiles: List[MonitoringProfile], role: str = "supera
     for p in profiles:
         status_icon = "🟢" if p.is_active else "🔴"
         merchant_check_icon = "🛡️" if p.merchant_check else "🌐"
+        tt_icon = "🟢" if p.trade_type == "BUY" else ("🔴" if p.trade_type == "SELL" else "🔄")
         buttons.append([
             InlineKeyboardButton(
-                text=f"{status_icon} {p.name} ({p.asset}/{p.fiat} {p.trade_type}) {merchant_check_icon}",
+                text=f"{status_icon} {p.name} ({p.asset}/{p.fiat} {tt_icon} {p.trade_type}) {merchant_check_icon}",
                 callback_data=f"prof_view_{p.id}"
             )
         ])
@@ -57,21 +58,28 @@ def get_profile_detail_keyboard(
     profile_id: int,
     is_active: bool,
     merchant_check: bool,
+    trade_type: str = "BUY",
     role: str = "superadmin",
 ) -> InlineKeyboardMarkup:
     toggle_text = "🔴 Приостановить" if is_active else "🟢 Активировать"
-    check_text = "🛡️ Только проверенные: ВКЛ" if merchant_check else "🌐 Все Мерчанты: ВКЛ"
+    check_text = "🛡️ Проверенные: ВКЛ" if merchant_check else "🌐 Все Мерчанты"
+    
+    tt_label = f"🔄 Тип: {trade_type}"
 
     buttons = []
     if role in ("admin", "superadmin"):
         buttons.extend([
             [
-            InlineKeyboardButton(text=toggle_text, callback_data=f"prof_toggle_{profile_id}"),
-            InlineKeyboardButton(text=check_text, callback_data=f"prof_check_{profile_id}"),
+                InlineKeyboardButton(text=toggle_text, callback_data=f"prof_toggle_{profile_id}"),
+                InlineKeyboardButton(text=check_text, callback_data=f"prof_check_{profile_id}"),
             ],
             [
-            InlineKeyboardButton(text="⏱ Изменить Интервал", callback_data=f"prof_interval_{profile_id}"),
-            InlineKeyboardButton(text="💳 Способы Оплаты", callback_data=f"prof_paytypes_{profile_id}"),
+                InlineKeyboardButton(text=tt_label, callback_data=f"prof_tradetype_{profile_id}"),
+                InlineKeyboardButton(text="⏱ Интервал", callback_data=f"prof_interval_{profile_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="💳 Способы Оплаты", callback_data=f"prof_paytypes_{profile_id}"),
+                InlineKeyboardButton(text="📊 Экспорт в Таблицу", callback_data=f"prof_export_sheet_{profile_id}"),
             ],
         ])
     if role == "superadmin":
@@ -99,12 +107,14 @@ def get_paytypes_multiselect_keyboard(profile_id: int, selected_paytypes: List[s
     buttons.append([InlineKeyboardButton(text="💾 Сохранить Изменения", callback_data=f"prof_view_{profile_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_wizard_nav_keyboard(prev_step_data: Optional[str] = None) -> InlineKeyboardMarkup:
+def get_back_menu_keyboard(callback_data: str = "menu_main") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data=callback_data)]]
+    )
+
+def get_wizard_nav_keyboard(prev_step_data: Optional[str] = None, cancel_data: str = "prof_cancel") -> InlineKeyboardMarkup:
     row = []
     if prev_step_data:
         row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=prev_step_data))
-    row.append(InlineKeyboardButton(text="❌ Отмена", callback_data="prof_cancel"))
+    row.append(InlineKeyboardButton(text="❌ Отмена", callback_data=cancel_data))
     return InlineKeyboardMarkup(inline_keyboard=[row])
-
-def get_back_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Главное Меню", callback_data="menu_main")]])

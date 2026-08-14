@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,7 @@ class GoogleSheetsService:
         self.credentials_path = None
         self.spreadsheet_id = None
         self._client = None
+        self._spreadsheet = None
         self._sheet = None
 
     def _find_credentials_file(self) -> Optional[Path]:
@@ -45,6 +47,16 @@ class GoogleSheetsService:
             if p.exists():
                 return p
         return None
+
+    @staticmethod
+    def sanitize_sheet_title(profile_name: str) -> str:
+        """Sanitize profile name to be a valid Google Sheets worksheet title (max 80 chars, no forbidden symbols)."""
+        if not profile_name or not profile_name.strip():
+            return "Лист1"
+        # Google Sheets disallows: * ? : [ ] \ / '
+        clean = re.sub(r"[\*\?\:\[\]\\/\']", "-", profile_name.strip())
+        clean = re.sub(r"-+", "-", clean).strip("- ")
+        return clean[:80] or "Лист1"
 
     async def get_columns_config(self) -> List[Dict[str, Any]]:
         async with AsyncSessionLocal() as session:
@@ -104,25 +116,20 @@ class GoogleSheetsService:
                 None, lambda: gspread.service_account(filename=str(self.credentials_path))
             )
             
-            spreadsheet = await loop.run_in_executor(
+            self._spreadsheet = await loop.run_in_executor(
                 None, lambda: self._client.open_by_key(self.spreadsheet_id)
             )
             
             try:
                 self._sheet = await loop.run_in_executor(
-                    None, lambda: spreadsheet.worksheet("Merchants")
+                    None, lambda: self._spreadsheet.get_worksheet(0)
                 )
             except Exception:
-                try:
-                    self._sheet = await loop.run_in_executor(
-                        None, lambda: spreadsheet.get_worksheet(0)
-                    )
-                except Exception:
-                    self._sheet = await loop.run_in_executor(
-                        None, lambda: spreadsheet.sheet1
-                    )
+                self._sheet = await loop.run_in_executor(
+                    None, lambda: self._spreadsheet.sheet1
+                )
 
-            logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id} (Worksheet: {self._sheet.title})")
+            logger.info(f"Successfully connected to Google Sheets ID: {self.spreadsheet_id} (Spreadsheet: {self._spreadsheet.title})")
             return True, "OK"
         except ModuleNotFoundError:
             return False, "⚠️ Пакет gspread не установлен. Выполните: pip install gspread google-auth"
@@ -142,19 +149,40 @@ class GoogleSheetsService:
         return success
 
     def is_configured(self) -> bool:
-        return self._sheet is not None
+        return self._spreadsheet is not None
+
+    async def get_or_create_worksheet(self, profile_name: str = ""):
+        """Get or create worksheet by profile name."""
+        if not self._spreadsheet:
+            await self.initialize()
+            if not self._spreadsheet:
+                return None
+
+        clean_title = self.sanitize_sheet_title(profile_name)
+        loop = asyncio.get_event_loop()
+
+        def _get_or_create():
+            try:
+                return self._spreadsheet.worksheet(clean_title)
+            except Exception:
+                # Create new worksheet
+                try:
+                    return self._spreadsheet.add_worksheet(title=clean_title, rows=1000, cols=20)
+                except Exception:
+                    return self._spreadsheet.get_worksheet(0)
+
+        return await loop.run_in_executor(None, _get_or_create)
 
     def _col_letter(self, n: int) -> str:
-        """Convert column index (1-based) to letter, e.g., 1 -> A, 10 -> J."""
         string = ""
         while n > 0:
             n, remainder = divmod(n - 1, 26)
             string = chr(65 + remainder) + string
         return string or "A"
 
-    async def _apply_formatting(self, total_rows: int, col_count: int):
-        """Apply bold headers, background color, center alignment, and text wrapping across dynamic columns."""
-        if not self._sheet:
+    async def _apply_formatting(self, worksheet, total_rows: int, col_count: int):
+        """Apply bold headers, background color, center alignment, and text wrapping on the target worksheet."""
+        if not worksheet:
             return
 
         last_col_letter = self._col_letter(max(1, col_count))
@@ -167,7 +195,7 @@ class GoogleSheetsService:
             # 1. Format Data Cells - Center Alignment + Text Wrap
             await loop.run_in_executor(
                 None,
-                lambda: self._sheet.format(
+                lambda: worksheet.format(
                     full_range,
                     {
                         "horizontalAlignment": "CENTER",
@@ -180,7 +208,7 @@ class GoogleSheetsService:
             # 2. Format Header Row - Bold + Light Blue Background + Text Wrap
             await loop.run_in_executor(
                 None,
-                lambda: self._sheet.format(
+                lambda: worksheet.format(
                     header_range,
                     {
                         "textFormat": {"bold": True, "fontSize": 10},
@@ -192,7 +220,7 @@ class GoogleSheetsService:
                 ),
             )
         except Exception as e:
-            logger.warning(f"Failed to apply formatting to Google Sheets: {e}")
+            logger.warning(f"Failed to apply formatting to worksheet {worksheet.title}: {e}")
 
     def _build_row(self, merchant: Merchant, contacts: list[Contact], enabled_cols: List[Dict[str, Any]]) -> List[Any]:
         contacts_str = ", ".join(c.value for c in contacts)
@@ -222,15 +250,13 @@ class GoogleSheetsService:
     def _format_local_datetime(value) -> str:
         if value is None:
             return ""
-        # SQLite returns UTC timestamps without tzinfo. Restore their meaning
-        # before converting them to the configured display timezone.
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(ZoneInfo(settings.timezone)).strftime("%Y-%m-%d %H:%M")
 
-    async def ensure_headers_exist(self):
-        """Ensure row 1 contains active headers."""
-        if not self._sheet:
+    async def ensure_headers_exist(self, worksheet):
+        """Ensure row 1 contains active headers on target worksheet."""
+        if not worksheet:
             return
 
         config = await self.get_columns_config()
@@ -239,17 +265,18 @@ class GoogleSheetsService:
 
         loop = asyncio.get_event_loop()
         try:
-            all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
+            all_vals = await loop.run_in_executor(None, lambda: worksheet.get_all_values())
             if not all_vals:
-                await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=[headers]))
+                await loop.run_in_executor(None, lambda: worksheet.update(range_name="A1", values=[headers]))
             elif all_vals[0] != headers:
-                await loop.run_in_executor(None, lambda: self._sheet.insert_row(headers, 1))
+                await loop.run_in_executor(None, lambda: worksheet.insert_row(headers, 1))
         except Exception as e:
-            logger.error(f"Error ensuring headers in Google Sheets: {e}")
+            logger.error(f"Error ensuring headers on worksheet {worksheet.title}: {e}")
 
-    async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
-        """Clean sheet completely, write active headers at A1, write data starting at A2 with dynamic columns."""
-        if not self._sheet:
+    async def overwrite_profile_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]], profile_name: str = ""):
+        """Clean profile worksheet completely, write headers at A1, and write data starting at A2."""
+        ws = await self.get_or_create_worksheet(profile_name)
+        if not ws:
             return
 
         config = await self.get_columns_config()
@@ -263,28 +290,31 @@ class GoogleSheetsService:
 
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, lambda: self._sheet.clear())
-            await loop.run_in_executor(None, lambda: self._sheet.update(range_name="A1", values=rows))
-            logger.info(f"Successfully overwrote Google Sheets with {len(rows)-1} merchant rows starting at A1.")
+            await loop.run_in_executor(None, lambda: ws.clear())
+            await loop.run_in_executor(None, lambda: ws.update(range_name="A1", values=rows))
+            logger.info(f"Successfully overwrote worksheet '{ws.title}' with {len(rows)-1} merchant rows.")
 
-            await self._apply_formatting(total_rows=len(rows), col_count=len(enabled_cols))
+            await self._apply_formatting(worksheet=ws, total_rows=len(rows), col_count=len(enabled_cols))
         except Exception as e:
-            logger.error(f"Error overwriting Google Sheets: {e}")
+            logger.error(f"Error overwriting worksheet '{ws.title}': {e}")
 
-    async def sync_merchant(self, merchant: Merchant, contacts: list[Contact]):
-        if await self.is_auto_export_enabled():
-            contacts_only = await self.is_auto_contacts_only_enabled()
-            if not contacts_only or bool(contacts):
-                await self.sync_merchants_batch([(merchant, contacts)])
+    async def overwrite_all_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]], profile_name: str = ""):
+        """Alias for backward compatibility."""
+        await self.overwrite_profile_merchants(merchant_contacts_list, profile_name=profile_name)
 
-    async def sync_merchants_batch(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]]):
-        if not self._sheet or not merchant_contacts_list:
+    async def append_merchants(self, merchant_contacts_list: List[Tuple[Merchant, list[Contact]]], profile_name: str = ""):
+        """Append new rows to the designated profile worksheet with headers & formatting."""
+        if not merchant_contacts_list:
+            return
+
+        ws = await self.get_or_create_worksheet(profile_name)
+        if not ws:
             return
 
         config = await self.get_columns_config()
         enabled_cols = [c for c in config if c.get("enabled", True)]
 
-        await self.ensure_headers_exist()
+        await self.ensure_headers_exist(ws)
 
         rows = []
         for merchant, contacts in merchant_contacts_list:
@@ -293,10 +323,16 @@ class GoogleSheetsService:
 
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, lambda: self._sheet.append_rows(rows))
-            logger.info(f"Successfully batch synced {len(rows)} merchant rows to Google Sheets.")
+            await loop.run_in_executor(None, lambda: ws.append_rows(rows))
+            logger.info(f"Successfully appended {len(rows)} merchant rows to worksheet '{ws.title}'.")
             
-            all_vals = await loop.run_in_executor(None, lambda: self._sheet.get_all_values())
-            await self._apply_formatting(total_rows=len(all_vals), col_count=len(enabled_cols))
+            all_vals = await loop.run_in_executor(None, lambda: ws.get_all_values())
+            await self._apply_formatting(worksheet=ws, total_rows=len(all_vals), col_count=len(enabled_cols))
         except Exception as e:
-            logger.error(f"Error batch appending rows to Google Sheets: {e}")
+            logger.error(f"Error appending rows to worksheet '{ws.title}': {e}")
+
+    async def sync_merchant(self, merchant: Merchant, contacts: list[Contact], profile_name: str = ""):
+        if await self.is_auto_export_enabled():
+            contacts_only = await self.is_auto_contacts_only_enabled()
+            if not contacts_only or bool(contacts):
+                await self.append_merchants([(merchant, contacts)], profile_name=profile_name)
