@@ -6,21 +6,29 @@ from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config.settings import settings
 from app.db.models import (
     Advertisement,
     Contact,
     Merchant,
     ProfileAdvertisement,
     ProfileMerchant,
+    SystemSetting,
 )
 from app.providers.binance.models import BinanceSearchItem
 from app.services.contact_extractor import ContactExtractor, ExtractedContact
+from app.services.groq_extractor import GroqContactExtractor
 
 logger = logging.getLogger(__name__)
 
 class MerchantRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def _get_setting(self, key: str, default: str = "") -> str:
+        res = await self.session.execute(select(SystemSetting).where(SystemSetting.key == key))
+        s = res.scalar_one_or_none()
+        return s.value if s and s.value else default
 
     async def get_by_id(self, merchant_id: int) -> Optional[Merchant]:
         stmt = (
@@ -88,12 +96,25 @@ class MerchantRepository:
                 f"{c.type}:{c.value.lower()}": c for c in (merchant.contacts or [])
             }
 
-        # Extract Contacts from nickname, remarks, autoReplyMsg
-        extracted: List[ExtractedContact] = ContactExtractor.extract_from_merchant_data(
-            nickname=merchant.nickname,
-            remarks=adv_data.remarks,
-            auto_reply=adv_data.autoReplyMsg,
-        )
+        # Extract Contacts: Groq AI if enabled, otherwise regex fallback
+        groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
+        groq_key_setting = await self._get_setting("groq_api_key", settings.groq_api_key)
+        groq_model_setting = await self._get_setting("groq_model", settings.groq_model)
+
+        extracted: List[ExtractedContact] = []
+        if groq_enabled_setting.lower() == "true" and groq_key_setting:
+            groq_extractor = GroqContactExtractor(api_key=groq_key_setting, model=groq_model_setting)
+            extracted = await groq_extractor.extract_from_merchant_data(
+                nickname=merchant.nickname or "",
+                remarks=adv_data.remarks or "",
+                auto_reply=adv_data.autoReplyMsg or "",
+            )
+        else:
+            extracted = ContactExtractor.extract_from_merchant_data(
+                nickname=merchant.nickname or "",
+                remarks=adv_data.remarks or "",
+                auto_reply=adv_data.autoReplyMsg or "",
+            )
 
         for ext in extracted:
             key = f"{ext.type}:{ext.value.lower()}"

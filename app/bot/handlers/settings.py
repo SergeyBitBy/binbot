@@ -1,26 +1,20 @@
 import asyncio
-import html
 import json
 import logging
 from pathlib import Path
-from urllib.parse import quote
-
-from aiogram import F, Router
+from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
+from app.config.settings import settings
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
-from app.services.sheets_service import DEFAULT_COLUMNS_CONFIG, GoogleSheetsService
+from app.services.sheets_service import GoogleSheetsService, DEFAULT_COLUMNS_CONFIG
+from app.services.groq_extractor import GroqContactExtractor
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -36,11 +30,14 @@ class ColumnRenameForm(StatesGroup):
     col_key = State()
     new_title = State()
 
+class GroqApiKeyForm(StatesGroup):
+    api_key = State()
+
 async def get_setting(key: str, default: str = "") -> str:
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(SystemSetting).where(SystemSetting.key == key))
         s = res.scalar_one_or_none()
-        return s.value if s else default
+        return s.value if s and s.value else default
 
 async def set_setting(key: str, value: str):
     """Set system setting with retry logic against database locks."""
@@ -85,26 +82,24 @@ async def cb_settings_menu(call: CallbackQuery):
     quiet_hours = await get_setting("quiet_hours_enabled", "false")
     q_start = await get_setting("quiet_hours_start", "23:00")
     q_end = await get_setting("quiet_hours_end", "07:00")
-    contact_ext = await get_setting("contact_extraction_enabled", "true")
+    groq_ai_on = (await get_setting("groq_ai_enabled", "true")).lower() == "true"
 
     mon_is_on = global_mon.lower() == "true"
     quiet_is_on = quiet_hours.lower() == "true"
-    contact_is_on = contact_ext.lower() == "true"
 
     mon_status = "🟢 Включен" if mon_is_on else "🔴 Выключен"
     quiet_status = f"🟢 Включено ({q_start} - {q_end})" if quiet_is_on else "🔴 Выключено"
-    contact_status = "🟢 Включен" if contact_is_on else "🔴 Выключен"
+    groq_status = "🟢 Groq AI (Llama 3.3)" if groq_ai_on else "🔴 Выключен (Резервный Regex)"
 
     text = (
         "⚙️ <b>ГЛОБАЛЬНЫЕ НАСТРОЙКИ СИСТЕМЫ</b>\n\n"
         f"⏯ <b>Автоматический Мониторинг:</b> {mon_status}\n"
         f"🌙 <b>Тихое Время (Quiet Hours):</b> {quiet_status}\n"
-        f"🔍 <b>Извлечение Контактов:</b> {contact_status}\n"
+        f"🤖 <b>ИИ Экстрактор Контактов:</b> {groq_status}\n"
     )
 
     btn_mon = "⏯ Анализ: 🟢 ВКЛ" if mon_is_on else "⏯ Анализ: 🔴 ВЫКЛ"
     btn_quiet = "🌙 Тихое Время: 🟢 ВКЛ" if quiet_is_on else "🌙 Тихое Время: 🔴 ВЫКЛ"
-    btn_contacts = "🔍 Контакты: 🟢 ВКЛ" if contact_is_on else "🔍 Контакты: 🔴 ВЫКЛ"
 
     buttons = [
         [
@@ -113,7 +108,7 @@ async def cb_settings_menu(call: CallbackQuery):
         ],
         [
             InlineKeyboardButton(text="⏰ Интервал Тихого Времени", callback_data="set_quiet_hours_time"),
-            InlineKeyboardButton(text=btn_contacts, callback_data="toggle_contact_extraction"),
+            InlineKeyboardButton(text="🤖 Groq AI Экстрактор", callback_data="menu_groq_settings"),
         ],
         [
             InlineKeyboardButton(text="📊 Настройки Google Sheets", callback_data="menu_google_sheets"),
@@ -124,6 +119,143 @@ async def cb_settings_menu(call: CallbackQuery):
     ]
 
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+# --- GROQ AI SETTINGS SUBMENU ---
+
+@router.callback_query(F.data == "menu_groq_settings")
+async def cb_groq_settings_menu(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    groq_enabled = (await get_setting("groq_ai_enabled", "true")).lower() == "true"
+    api_key = await get_setting("groq_api_key", settings.groq_api_key)
+    model = await get_setting("groq_model", settings.groq_model)
+
+    status_str = "🟢 Включен (Нейросеть Groq LPU)" if groq_enabled else "🔴 Выключен (Резервный Regex)"
+    masked_key = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else (api_key or "Не задан")
+
+    text = (
+        "🤖 <b>НАСТРОЙКИ ИИ ЭКСТРАКТОРА КОНТАКТОВ (GROQ)</b>\n\n"
+        "Нейросетевое извлечение контактов на базе моделей Llama 3 с пониманием любых языков, сленга и контекста без ложных срабатываний.\n\n"
+        f"📊 <b>Статус ИИ:</b> {status_str}\n"
+        f"🧠 <b>Модель ИИ:</b> <code>{model}</code>\n"
+        f"🔑 <b>API Ключ:</b> <code>{masked_key}</code>\n"
+    )
+
+    btn_toggle = "🤖 ИИ: 🟢 ВКЛ" if groq_enabled else "🤖 ИИ: 🔴 ВЫКЛ (Regex)"
+    btn_model_switch = "🧠 Модель: 70B Versatile" if "70b" in model.lower() else "🧠 Модель: 8B Instant"
+
+    buttons = [
+        [
+            InlineKeyboardButton(text=btn_toggle, callback_data="toggle_groq_enabled"),
+            InlineKeyboardButton(text=btn_model_switch, callback_data="toggle_groq_model"),
+        ],
+        [
+            InlineKeyboardButton(text="🔑 Изменить Groq API Key", callback_data="set_groq_api_key"),
+            InlineKeyboardButton(text="🧪 Проверить Связь с Groq", callback_data="test_groq_connection"),
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_settings"),
+        ],
+    ]
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "toggle_groq_enabled")
+async def cb_toggle_groq(call: CallbackQuery):
+    current = await get_setting("groq_ai_enabled", "true")
+    new_val = "false" if current.lower() == "true" else "true"
+    await set_setting("groq_ai_enabled", new_val)
+
+    status_msg = "🟢 ИИ Экстрактор Groq ВКЛЮЧЕН!" if new_val == "true" else "🔴 ИИ Экстрактор ВЫКЛЮЧЕН (работает Regex)!"
+    try:
+        await call.answer(status_msg, show_alert=True)
+    except Exception:
+        pass
+
+    await cb_groq_settings_menu(call)
+
+@router.callback_query(F.data == "toggle_groq_model")
+async def cb_toggle_groq_model(call: CallbackQuery):
+    current = await get_setting("groq_model", settings.groq_model)
+    new_model = "llama-3.1-8b-instant" if "70b" in current.lower() else "llama-3.3-70b-versatile"
+    await set_setting("groq_model", new_model)
+
+    try:
+        await call.answer(f"Модель изменена на: {new_model}", show_alert=True)
+    except Exception:
+        pass
+
+    await cb_groq_settings_menu(call)
+
+@router.callback_query(F.data == "set_groq_api_key")
+async def cb_set_groq_key_start(call: CallbackQuery, state: FSMContext):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    await state.set_state(GroqApiKeyForm.api_key)
+    text = (
+        "🔑 <b>ВВОД КЛЮЧА GROQ API KEY</b>\n\n"
+        "Отправьте ваш API ключ от Groq (например: `gsk_...`):\n\n"
+        "<i>Получить бесплатный ключ можно на сайте: <a href='https://console.groq.com/keys'>console.groq.com/keys</a></i>"
+    )
+    await call.message.edit_text(text, reply_markup=get_back_menu_keyboard(), parse_mode="HTML", disable_web_page_preview=True)
+
+@router.message(GroqApiKeyForm.api_key)
+async def process_groq_key_input(message: Message, state: FSMContext):
+    key = message.text.strip()
+    await state.clear()
+
+    await set_setting("groq_api_key", key)
+    
+    # Test key immediately
+    extractor = GroqContactExtractor()
+    success, msg, latency = await extractor.test_connection(key)
+
+    if success:
+        await message.answer(
+            f"✅ <b>Groq API Ключ успешно сохранен и проверен!</b>\n\n⚡ Время отклика: <code>{latency}мс</code>",
+            reply_markup=get_back_menu_keyboard(),
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer(
+            f"⚠️ <b>Ключ сохранен, но тест подключения завершился с ошибкой:</b>\n{msg}",
+            reply_markup=get_back_menu_keyboard(),
+            parse_mode="HTML"
+        )
+
+@router.callback_query(F.data == "test_groq_connection")
+async def cb_test_groq_connection(call: CallbackQuery):
+    api_key = await get_setting("groq_api_key", settings.groq_api_key)
+    model = await get_setting("groq_model", settings.groq_model)
+
+    if not api_key:
+        try:
+            await call.answer("⚠️ API-ключ Groq не задан!", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    try:
+        await call.answer("⏳ Тестирую связь с серверами Groq LPU...", show_alert=False)
+    except Exception:
+        pass
+
+    extractor = GroqContactExtractor()
+    success, msg, latency = await extractor.test_connection(api_key, model)
+
+    alert_text = f"{msg}\n⚡ Пинг: {latency} мс\n🧠 Модель: {model}"
+    try:
+        await call.answer(alert_text, show_alert=True)
+    except Exception:
+        pass
+
+# --- END GROQ AI SETTINGS ---
 
 @router.callback_query(F.data == "menu_google_sheets")
 async def cb_google_sheets_menu(call: CallbackQuery):
@@ -152,16 +284,10 @@ async def cb_google_sheets_menu(call: CallbackQuery):
 
     sheets_auto_status = "🟢 Включен (Авто)" if sheets_auto_is_on else "🔴 Выключен (Ручной)"
     filter_status = "📞 Только с контактами" if auto_contacts_is_on else "🌐 Все найденные мерчанты"
-    display_sheet_id = html.escape(sheet_id[:25])
-    sheet_link = ""
-    if sheet_id and sheet_id != "Не задан":
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{quote(sheet_id, safe='-_')}"
-        sheet_link = f"🔗 <a href=\"{sheet_url}\">Открыть Google Таблицу</a>\n\n"
 
     text = (
         "📊 <b>НАСТРОЙКИ ИНТЕГРАЦИИ GOOGLE SHEETS</b>\n\n"
-        f"{sheet_link}"
-        f"📊 <b>Google Таблица ID:</b> <code>{display_sheet_id}...</code>\n"
+        f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
         f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
         f"🔄 <b>Авто-Экспорт:</b> {sheets_auto_status}\n"
         f"🎯 <b>Фильтр Авто-Экспорта:</b> {filter_status}\n"
@@ -457,13 +583,6 @@ async def cb_toggle_quiet(call: CallbackQuery):
     current = await get_setting("quiet_hours_enabled", "false")
     new_val = "false" if current.lower() == "true" else "true"
     await set_setting("quiet_hours_enabled", new_val)
-    await cb_settings_menu(call)
-
-@router.callback_query(F.data == "toggle_contact_extraction")
-async def cb_toggle_contacts(call: CallbackQuery):
-    current = await get_setting("contact_extraction_enabled", "true")
-    new_val = "false" if current.lower() == "true" else "true"
-    await set_setting("contact_extraction_enabled", new_val)
     await cb_settings_menu(call)
 
 @router.callback_query(F.data == "set_google_sheet_id")

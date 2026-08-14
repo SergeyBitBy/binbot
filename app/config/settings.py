@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     google_service_account_file: str = "data/google_credentials.json"
     google_spreadsheet_id: str = ""
     
+    # Groq AI Settings
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_ai_enabled: bool = True
+    
     # Binance Provider defaults
     binance_request_timeout: float = 15.0
     binance_max_retries: int = 3
