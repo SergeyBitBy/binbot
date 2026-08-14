@@ -18,8 +18,9 @@ from app.bot.keyboards.main_kb import (
     get_wizard_nav_keyboard,
 )
 from app.bot.states.profile_states import ProfileEditForm, ProfileForm
-from app.db.database import AsyncSessionLocal
+from app.db.database import AsyncSessionLocal, database_write_lock
 from app.db.repositories.profile_repo import ProfileRepository
+from app.services.monitoring_service import MonitoringService
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -215,7 +216,16 @@ async def cb_prof_create_step1(call: CallbackQuery, state: FSMContext):
 
 @router.message(ProfileForm.name)
 async def process_prof_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text.strip())
+    name = message.text.strip()
+    async with AsyncSessionLocal() as session:
+        existing = await ProfileRepository(session).get_by_name(name)
+    if existing is not None:
+        await message.answer(
+            "⚠️ Профиль с таким названием уже существует. Введите другое название.",
+            reply_markup=get_wizard_nav_keyboard(),
+        )
+        return
+    await state.update_data(name=name)
     await state.set_state(ProfileForm.asset)
     text = "➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 2/5)</b>\n\nВведите криптовалюту/ассет (например: <code>USDT</code>, <code>BTC</code>, <code>ETH</code>):"
     await message.answer(text, reply_markup=get_wizard_nav_keyboard(prev_step_data="prof_create"), parse_mode="HTML")
@@ -284,7 +294,12 @@ async def cb_prof_back_to_trade_type(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("➕ <b>СОЗДАНИЕ ПРОФИЛЯ (Шаг 4/5)</b>\n\nВыберите направление сделки (BUY/SELL):", reply_markup=kb, parse_mode="HTML")
 
 @router.message(ProfileForm.scan_interval)
-async def process_prof_interval(message: Message, state: FSMContext):
+async def process_prof_interval(
+    message: Message,
+    state: FSMContext,
+    monitoring_service: MonitoringService,
+    role: str = "admin",
+):
     try:
         interval = int(message.text.strip())
         if interval < 10:
@@ -293,15 +308,32 @@ async def process_prof_interval(message: Message, state: FSMContext):
         interval = 60
 
     data = await state.get_data()
-    async with AsyncSessionLocal() as session:
-        repo = ProfileRepository(session)
-        await repo.create(
-            name=data["name"],
-            asset=data["asset"],
-            fiat=data["fiat"],
-            trade_type=data["trade_type"],
-            scan_interval_seconds=interval,
-        )
+    async with database_write_lock:
+        async with AsyncSessionLocal() as session:
+            profile, created = await ProfileRepository(session).get_or_create(
+                name=data["name"],
+                asset=data["asset"],
+                fiat=data["fiat"],
+                trade_type=data["trade_type"],
+                scan_interval_seconds=interval,
+            )
 
     await state.clear()
-    await message.answer("🎉 <b>Профиль успешно создан и добавлен в систему!</b>", reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    monitoring_enabled = await monitoring_service.is_global_monitoring_enabled()
+    if monitoring_enabled and profile.is_active:
+        monitoring_service.submit_scan(profile.id, trigger="profile_created", force=True)
+        scan_status = " Первое сканирование запущено."
+    else:
+        scan_status = " Глобальный мониторинг выключен — сканирование пока не запущено."
+
+    if created:
+        logger.info("Created monitoring profile id=%s name=%s", profile.id, profile.name)
+        text = f"🎉 <b>Профиль успешно создан!</b>{scan_status}"
+    else:
+        logger.info("Profile creation repeated for existing id=%s name=%s", profile.id, profile.name)
+        text = f"ℹ️ <b>Профиль с таким названием уже существует.</b>{scan_status}"
+    await message.answer(
+        text,
+        reply_markup=get_main_menu_keyboard(role=role),
+        parse_mode="HTML",
+    )

@@ -341,6 +341,26 @@ async def test_profile_lease_is_atomic_for_second_claim():
 
 
 @pytest.mark.asyncio
+async def test_profile_get_or_create_is_idempotent():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with sessions() as session:
+        repo = ProfileRepository(session)
+        first, first_created = await repo.get_or_create(
+            name="USDT/EUR", asset="USDT", fiat="EUR", trade_type="BUY"
+        )
+        second, second_created = await repo.get_or_create(
+            name="USDT/EUR", asset="USDT", fiat="EUR", trade_type="BUY"
+        )
+    assert first_created is True
+    assert second_created is False
+    assert first.id == second.id
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_outbox_creates_per_chat_delivery_and_deduplicates():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

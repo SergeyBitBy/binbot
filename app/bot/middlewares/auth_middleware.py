@@ -96,4 +96,12 @@ class AuthMiddleware(BaseMiddleware):
             return None
         except Exception as e:
             logger.exception(f"Unhandled error in AuthMiddleware: {e}")
+            try:
+                error_text = "⚠️ Не удалось выполнить действие. Попробуйте ещё раз или откройте /start."
+                if isinstance(event, Message):
+                    await event.answer(error_text)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer(error_text, show_alert=True)
+            except Exception:
+                logger.exception("Could not send handler error to Telegram")
             return None

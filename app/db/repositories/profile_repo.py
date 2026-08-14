@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import MonitoringProfile, ScanHistory
@@ -58,6 +59,20 @@ class ProfileRepository:
         await self.session.commit()
         await self.session.refresh(profile)
         return profile
+
+    async def get_or_create(self, **kwargs) -> tuple[MonitoringProfile, bool]:
+        """Create a profile once and recover cleanly from concurrent duplicates."""
+        existing = await self.get_by_name(kwargs["name"])
+        if existing is not None:
+            return existing, False
+        try:
+            return await self.create(**kwargs), True
+        except IntegrityError:
+            await self.session.rollback()
+            existing = await self.get_by_name(kwargs["name"])
+            if existing is not None:
+                return existing, False
+            raise
 
     async def update_lock(self, profile_id: int, is_locked: bool):
         profile = await self.get_by_id(profile_id)
