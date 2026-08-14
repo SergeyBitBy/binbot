@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     notification_max_attempts: int = 10
     notification_worker_interval_seconds: int = 5
     log_retention_days: int = 30
+    log_max_file_mb: int = 10
+    log_max_total_mb: int = 100
     backup_retention_count: int = 14
     
     model_config = SettingsConfigDict(

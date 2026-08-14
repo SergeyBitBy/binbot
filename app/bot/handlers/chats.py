@@ -1,12 +1,20 @@
+import asyncio
 import logging
-from aiogram import Router, F
+
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.bot.keyboards.main_kb import get_back_menu_keyboard
-from app.db.database import AsyncSessionLocal
+from app.db.database import AsyncSessionLocal, database_write_lock
 from app.db.models import AllowedChat
 
 logger = logging.getLogger(__name__)
@@ -14,6 +22,34 @@ router = Router()
 
 class ChatForm(StatesGroup):
     input_chat = State()
+
+
+async def add_allowed_chat(chat_id: int, max_attempts: int = 3) -> bool:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with database_write_lock:
+                async with AsyncSessionLocal() as session:
+                    existing = await session.scalar(
+                        select(AllowedChat.id).where(AllowedChat.chat_id == chat_id)
+                    )
+                    if existing:
+                        return False
+                    session.add(AllowedChat(chat_id=chat_id, title=f"Чат {chat_id}"))
+                    await session.commit()
+                    return True
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == max_attempts:
+                raise
+            delay = min(5.0, attempt * 1.5)
+            logger.warning(
+                "SQLite was busy while adding chat_id=%s; retry %s/%s in %.1fs",
+                chat_id,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    return False
 
 @router.callback_query(F.data == "menu_chats")
 async def cb_chats_list(call: CallbackQuery):
@@ -62,27 +98,31 @@ async def process_chat_input(message: Message, state: FSMContext):
         await message.answer("⚠️ Ошибка: Chat ID должен быть целым числом.", reply_markup=get_back_menu_keyboard())
         return
 
-    async with AsyncSessionLocal() as session:
-        chat = AllowedChat(chat_id=chat_id, title=f"Чат {chat_id}")
-        session.add(chat)
-        try:
-            await session.commit()
+    try:
+        added = await add_allowed_chat(chat_id)
+        if added:
             await message.answer(f"✅ <b>Чат ID `{chat_id}` успешно добавлен!</b>", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
-        except Exception as e:
-            await session.rollback()
-            await message.answer(f"⚠️ Ошибка добавления (возможно, уже существует): {e}", reply_markup=get_back_menu_keyboard(), parse_mode="HTML")
+        else:
+            await message.answer("ℹ️ Этот чат уже находится в списке разрешенных.", reply_markup=get_back_menu_keyboard())
+    except OperationalError:
+        logger.exception("Could not add chat_id=%s after SQLite retries", chat_id)
+        await message.answer(
+            "⚠️ База данных занята длительным сканированием. Попробуйте еще раз через минуту.",
+            reply_markup=get_back_menu_keyboard(),
+        )
 
 @router.callback_query(F.data.startswith("chat_del_"))
 async def cb_chat_del(call: CallbackQuery):
     c_id = int(call.data.split("_")[2])
-    async with AsyncSessionLocal() as session:
-        res = await session.execute(select(AllowedChat).where(AllowedChat.id == c_id))
-        chat = res.scalar_one_or_none()
-        if chat:
-            await session.delete(chat)
-            await session.commit()
-            try:
-                await call.answer("Чат удален из рассылки", show_alert=True)
-            except Exception:
-                pass
+    async with database_write_lock:
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(select(AllowedChat).where(AllowedChat.id == c_id))
+            chat = res.scalar_one_or_none()
+            if chat:
+                await session.delete(chat)
+                await session.commit()
+                try:
+                    await call.answer("Чат удален из рассылки", show_alert=True)
+                except Exception:
+                    pass
     await cb_chats_list(call)

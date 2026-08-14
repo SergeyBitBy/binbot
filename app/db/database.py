@@ -1,11 +1,21 @@
+import asyncio
 import logging
+
 from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config.settings import settings
-from app.db.models import AdminUser, AllowedChat, Base, MonitoringProfile, ScanHistory, SystemSetting
+from app.db.models import (
+    AdminUser,
+    AllowedChat,
+    Base,
+    MonitoringProfile,
+    ScanHistory,
+    SystemSetting,
+)
 
 logger = logging.getLogger(__name__)
+database_write_lock = asyncio.Lock()
 
 engine = create_async_engine(
     settings.database_url,

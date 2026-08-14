@@ -1,18 +1,26 @@
 import asyncio
+import html
 import json
 import logging
 from pathlib import Path
-from aiogram import Router, F
+from urllib.parse import quote
+
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from sqlalchemy import select
 
 from app.bot.keyboards.main_kb import get_back_menu_keyboard, get_main_menu_keyboard
 from app.db.database import AsyncSessionLocal
 from app.db.models import SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
-from app.services.sheets_service import GoogleSheetsService, DEFAULT_COLUMNS_CONFIG
+from app.services.sheets_service import DEFAULT_COLUMNS_CONFIG, GoogleSheetsService
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -144,10 +152,16 @@ async def cb_google_sheets_menu(call: CallbackQuery):
 
     sheets_auto_status = "🟢 Включен (Авто)" if sheets_auto_is_on else "🔴 Выключен (Ручной)"
     filter_status = "📞 Только с контактами" if auto_contacts_is_on else "🌐 Все найденные мерчанты"
+    display_sheet_id = html.escape(sheet_id[:25])
+    sheet_link = ""
+    if sheet_id and sheet_id != "Не задан":
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{quote(sheet_id, safe='-_')}"
+        sheet_link = f"🔗 <a href=\"{sheet_url}\">Открыть Google Таблицу</a>\n\n"
 
     text = (
         "📊 <b>НАСТРОЙКИ ИНТЕГРАЦИИ GOOGLE SHEETS</b>\n\n"
-        f"📊 <b>Google Таблица ID:</b> <code>{sheet_id[:25]}...</code>\n"
+        f"{sheet_link}"
+        f"📊 <b>Google Таблица ID:</b> <code>{display_sheet_id}...</code>\n"
         f"📄 <b>Файл Ключа (service_account.json):</b> {json_status}\n"
         f"🔄 <b>Авто-Экспорт:</b> {sheets_auto_status}\n"
         f"🎯 <b>Фильтр Авто-Экспорта:</b> {filter_status}\n"

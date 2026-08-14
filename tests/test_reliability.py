@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -12,7 +13,9 @@ from app.bot.access import (
     is_action_allowed,
     normalize_role,
 )
+from app.bot.handlers.chats import add_allowed_chat
 from app.bot.keyboards.main_kb import get_main_menu_keyboard
+from app.config.logging import _prune_logs
 from app.db.models import (
     AllowedChat,
     Base,
@@ -240,6 +243,81 @@ def test_superadmin_safety_guards():
         target_role="superadmin",
         superadmin_count=2,
     )
+
+
+def test_log_pruning_removes_oldest_archives_first(tmp_path):
+    active = tmp_path / "bot.log"
+    old = tmp_path / "bot.log.2026-08-01.gz"
+    recent = tmp_path / "bot.log.1.gz"
+    active.write_bytes(b"a" * 40)
+    old.write_bytes(b"b" * 40)
+    recent.write_bytes(b"c" * 40)
+    old.touch()
+    recent.touch()
+    old_mtime = old.stat().st_mtime - 100
+    recent_mtime = recent.stat().st_mtime
+    os.utime(old, (old_mtime, old_mtime))
+    os.utime(recent, (recent_mtime, recent_mtime))
+
+    _prune_logs(tmp_path, 90)
+
+    assert active.exists()
+    assert not old.exists()
+    assert recent.exists()
+
+
+@pytest.mark.asyncio
+async def test_allowed_chat_addition_is_idempotent(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr("app.bot.handlers.chats.AsyncSessionLocal", sessions)
+
+    assert await add_allowed_chat(-5395511036) is True
+    assert await add_allowed_chat(-5395511036) is False
+    async with sessions() as session:
+        chats = list((await session.execute(select(AllowedChat.chat_id))).scalars())
+    assert chats == [-5395511036]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_notification_worker_backfills_new_allowed_chat(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr("app.services.notification_service.AsyncSessionLocal", sessions)
+
+    async with sessions() as session:
+        profile = MonitoringProfile(name="backfill", is_active=True)
+        session.add_all([profile, AllowedChat(chat_id=100)])
+        await session.flush()
+        await NotificationService.enqueue(
+            session,
+            event_type="NEW_MERCHANT",
+            profile_id=profile.id,
+            merchant_id=None,
+            payload={"user_no": "u1"},
+            deduplication_key="backfill-new-chat",
+        )
+        await session.commit()
+    async with sessions() as session:
+        session.add(AllowedChat(chat_id=200))
+        await session.commit()
+
+    class Bot:
+        def __init__(self):
+            self.chat_ids = []
+
+        async def send_message(self, *, chat_id, **kwargs):
+            self.chat_ids.append(chat_id)
+
+    bot = Bot()
+    await NotificationService(bot=bot).process_pending()
+    assert set(bot.chat_ids) == {100, 200}
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

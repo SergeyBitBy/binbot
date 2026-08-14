@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.config.settings import settings
-from app.db.database import AsyncSessionLocal
+from app.db.database import AsyncSessionLocal, database_write_lock
 from app.db.models import Advertisement, ScanHistory, SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
 from app.db.repositories.profile_repo import ProfileRepository
@@ -24,7 +24,7 @@ class MonitoringService:
         self.sheets_service = sheets_service or GoogleSheetsService()
         self._semaphore = asyncio.Semaphore(settings.monitoring_max_concurrency)
         self._detail_semaphore = asyncio.Semaphore(settings.binance_detail_concurrency)
-        self._persistence_lock = asyncio.Lock()
+        self._persistence_lock = database_write_lock
         self._tasks: set[asyncio.Task] = set()
         self._accepting = True
 
