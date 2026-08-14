@@ -37,6 +37,11 @@ def _normalize_contact_key(c_type: str, c_val: str) -> str:
 class MerchantRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+        self._merchants_cache: dict[str, Merchant] = {}
+        self._ads_cache: dict[str, Advertisement] = {}
+        self._contacts_cache: dict[int, dict[str, Contact]] = {}
+        self._profile_merchants_cache: dict[tuple[int, int], ProfileMerchant] = {}
+        self._profile_ads_cache: dict[tuple[int, int], ProfileAdvertisement] = {}
 
     async def _get_setting(self, key: str, default: str = "") -> str:
         res = await self.session.execute(select(SystemSetting).where(SystemSetting.key == key))
@@ -53,13 +58,18 @@ class MerchantRepository:
         return res.scalar_one_or_none()
 
     async def get_by_user_no(self, user_no: str) -> Optional[Merchant]:
+        if user_no in self._merchants_cache:
+            return self._merchants_cache[user_no]
         stmt = (
             select(Merchant)
             .where(Merchant.user_no == user_no)
             .options(selectinload(Merchant.contacts), selectinload(Merchant.advertisements))
         )
         res = await self.session.execute(stmt)
-        return res.scalar_one_or_none()
+        m = res.scalar_one_or_none()
+        if m:
+            self._merchants_cache[user_no] = m
+        return m
 
     async def process_binance_item(
         self,
@@ -99,7 +109,7 @@ class MerchantRepository:
                 is_active=True,
             )
             self.session.add(merchant)
-            await self.session.flush()
+            self._merchants_cache[advertiser_data.userNo] = merchant
         else:
             merchant = existing_merchant
             merchant.nickname = advertiser_data.nickName or merchant.nickname
@@ -112,13 +122,15 @@ class MerchantRepository:
             merchant.last_seen_at = now
             merchant.is_active = True
 
-        # Fetch all existing contacts from DB to prevent duplicate insertions
-        c_stmt = select(Contact).where(Contact.merchant_id == merchant.id)
-        c_res = await self.session.execute(c_stmt)
-        all_existing_contacts = c_res.scalars().all()
-        existing_contacts_map = {
-            _normalize_contact_key(c.type, c.value): c for c in all_existing_contacts
-        }
+        # Fetch all existing contacts from DB or cache to prevent duplicate insertions
+        if merchant.id not in self._contacts_cache:
+            c_stmt = select(Contact).where(Contact.merchant_id == merchant.id)
+            c_res = await self.session.execute(c_stmt)
+            all_existing_contacts = c_res.scalars().all()
+            self._contacts_cache[merchant.id] = {
+                _normalize_contact_key(c.type, c.value): c for c in all_existing_contacts
+            }
+        existing_contacts_map = self._contacts_cache[merchant.id]
 
         # Extract Contacts: use pre-computed if available, otherwise fetch
         extracted: List[ExtractedContact] = []
@@ -157,9 +169,14 @@ class MerchantRepository:
                 existing_contacts_map[norm_key] = contact
 
         # Process Advertisement
-        ad_stmt = select(Advertisement).where(Advertisement.adv_no == adv_data.advNo)
-        ad_res = await self.session.execute(ad_stmt)
-        existing_ad = ad_res.scalar_one_or_none()
+        if adv_data.advNo in self._ads_cache:
+            existing_ad = self._ads_cache[adv_data.advNo]
+        else:
+            ad_stmt = select(Advertisement).where(Advertisement.adv_no == adv_data.advNo)
+            ad_res = await self.session.execute(ad_stmt)
+            existing_ad = ad_res.scalar_one_or_none()
+            if existing_ad:
+                self._ads_cache[adv_data.advNo] = existing_ad
 
         is_new_or_updated_ad = False
         pay_methods = []
@@ -195,6 +212,7 @@ class MerchantRepository:
                 detail_checked_at=detail_checked_at,
             )
             self.session.add(ad)
+            self._ads_cache[adv_data.advNo] = ad
         else:
             if existing_ad.price != adv_data.price:
                 is_new_or_updated_ad = True
@@ -220,47 +238,64 @@ class MerchantRepository:
         advertisement_id: int,
         seen_at: datetime,
     ) -> tuple[bool, bool]:
-        pm_res = await self.session.execute(
-            select(ProfileMerchant).where(
-                ProfileMerchant.profile_id == profile_id,
-                ProfileMerchant.merchant_id == merchant_id,
-            )
-        )
-        pm = pm_res.scalar_one_or_none()
-        is_new_profile_merchant = pm is None
-        if pm is None:
-            self.session.add(ProfileMerchant(
-                profile_id=profile_id,
-                merchant_id=merchant_id,
-                first_seen_at=seen_at,
-                last_seen_at=seen_at,
-                is_active=True,
-            ))
-        else:
+        pm_key = (profile_id, merchant_id)
+        if pm_key in self._profile_merchants_cache:
+            pm = self._profile_merchants_cache[pm_key]
+            is_new_profile_merchant = False
             pm.last_seen_at = seen_at
             pm.is_active = True
-
-        pa_res = await self.session.execute(
-            select(ProfileAdvertisement).where(
-                ProfileAdvertisement.profile_id == profile_id,
-                ProfileAdvertisement.advertisement_id == advertisement_id,
-            )
-        )
-        pa = pa_res.scalar_one_or_none()
-        is_new_profile_ad = pa is None
-        if pa is None:
-            self.session.add(ProfileAdvertisement(
-                profile_id=profile_id,
-                advertisement_id=advertisement_id,
-                first_seen_at=seen_at,
-                last_seen_at=seen_at,
-                is_active=True,
-            ))
         else:
+            pm_res = await self.session.execute(
+                select(ProfileMerchant).where(
+                    ProfileMerchant.profile_id == profile_id,
+                    ProfileMerchant.merchant_id == merchant_id,
+                )
+            )
+            pm = pm_res.scalar_one_or_none()
+            is_new_profile_merchant = pm is None
+            if pm is None:
+                pm = ProfileMerchant(
+                    profile_id=profile_id,
+                    merchant_id=merchant_id,
+                    first_seen_at=seen_at,
+                    last_seen_at=seen_at,
+                    is_active=True,
+                )
+                self.session.add(pm)
+            else:
+                pm.last_seen_at = seen_at
+                pm.is_active = True
+            self._profile_merchants_cache[pm_key] = pm
+
+        pa_key = (profile_id, advertisement_id)
+        if pa_key in self._profile_ads_cache:
+            pa = self._profile_ads_cache[pa_key]
+            is_new_profile_ad = False
             pa.last_seen_at = seen_at
             pa.is_active = True
+        else:
+            pa_res = await self.session.execute(
+                select(ProfileAdvertisement).where(
+                    ProfileAdvertisement.profile_id == profile_id,
+                    ProfileAdvertisement.advertisement_id == advertisement_id,
+                )
+            )
+            pa = pa_res.scalar_one_or_none()
+            is_new_profile_ad = pa is None
+            if pa is None:
+                pa = ProfileAdvertisement(
+                    profile_id=profile_id,
+                    advertisement_id=advertisement_id,
+                    first_seen_at=seen_at,
+                    last_seen_at=seen_at,
+                    is_active=True,
+                )
+                self.session.add(pa)
+            else:
+                pa.last_seen_at = seen_at
+                pa.is_active = True
+            self._profile_ads_cache[pa_key] = pa
 
-        await self.session.flush()
         return is_new_profile_merchant, is_new_profile_ad
 
     async def deactivate_missing_for_profile(self, profile_id: int, scan_started_at: datetime) -> None:
