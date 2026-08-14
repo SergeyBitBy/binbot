@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -21,6 +21,8 @@ from app.providers.binance.models import BinanceSearchItem
 from app.providers.binance.provider import BinanceP2PProvider
 from app.services.notification_service import NotificationService
 from app.services.sheets_service import GoogleSheetsService
+from app.services.groq_extractor import GroqContactExtractor
+from app.services.contact_extractor import ContactExtractor, ExtractedContact
 
 logger = logging.getLogger(__name__)
 
@@ -122,26 +124,45 @@ class MonitoringService:
             except Exception as e:
                 logger.exception("Failed scan task for profile id=%s: %s", profile_id, e)
 
-    async def _enrich_item(self, item: BinanceSearchItem) -> tuple[BinanceSearchItem, bool, datetime]:
+    async def _enrich_item(
+        self,
+        item: BinanceSearchItem,
+        groq_extractor: Optional[GroqContactExtractor] = None,
+        use_regex: bool = False,
+    ) -> tuple[BinanceSearchItem, bool, datetime, List[ExtractedContact]]:
         checked_at = datetime.now(timezone.utc)
-        if item.adv.remarks and item.adv.autoReplyMsg:
-            return item, True, checked_at
         user_no = item.advertiser.userNo
         detail = None
-        if hasattr(self.provider, "fetch_advertiser_detail"):
-            detail = await self.provider.fetch_advertiser_detail(user_no)
-        elif hasattr(self.provider, "client") and hasattr(self.provider.client, "get_adv_detail"):
-            res = await self.provider.client.get_adv_detail(item.adv.advNo)
-            if res and getattr(res, "success", False) and getattr(res, "data", None):
-                adv = res.data.get("adv", {})
-                item.adv.remarks = item.adv.remarks or adv.get("remarks")
-                item.adv.autoReplyMsg = item.adv.autoReplyMsg or adv.get("autoReplyMsg")
-                return item, True, checked_at
-        if not detail:
-            return item, False, checked_at
-        item.adv.remarks = item.adv.remarks or detail.remarks
-        item.adv.autoReplyMsg = item.adv.autoReplyMsg or detail.auto_reply_msg
-        return item, True, checked_at
+        ok = True
+        if not (item.adv.remarks and item.adv.autoReplyMsg):
+            if hasattr(self.provider, "fetch_advertiser_detail"):
+                detail = await self.provider.fetch_advertiser_detail(user_no)
+            elif hasattr(self.provider, "client") and hasattr(self.provider.client, "get_adv_detail"):
+                res = await self.provider.client.get_adv_detail(item.adv.advNo)
+                if res and getattr(res, "success", False) and getattr(res, "data", None):
+                    adv = res.data.get("adv", {})
+                    item.adv.remarks = item.adv.remarks or adv.get("remarks")
+                    item.adv.autoReplyMsg = item.adv.autoReplyMsg or adv.get("autoReplyMsg")
+            if detail:
+                item.adv.remarks = item.adv.remarks or detail.remarks
+                item.adv.autoReplyMsg = item.adv.autoReplyMsg or detail.auto_reply_msg
+            elif not (item.adv.remarks or item.adv.autoReplyMsg):
+                ok = False
+
+        # Extract contacts OUTSIDE database session in parallel
+        contacts: List[ExtractedContact] = []
+        if groq_extractor:
+            contacts = await groq_extractor.extract_from_merchant_data(
+                remarks=item.adv.remarks or "",
+                auto_reply=item.adv.autoReplyMsg or "",
+            )
+        elif use_regex:
+            contacts = ContactExtractor.extract_from_merchant_data(
+                remarks=item.adv.remarks or "",
+                auto_reply=item.adv.autoReplyMsg or "",
+            )
+
+        return item, ok, checked_at, contacts
 
     async def scan_profile(
         self,
@@ -203,8 +224,20 @@ class MonitoringService:
             if not all_items and not is_complete:
                 raise RuntimeError(last_error or "Binance returned no usable data")
 
-            enriched = await asyncio.gather(*(self._enrich_item(item) for item in all_items))
-            history.detail_success_count = sum(ok for _, ok, _ in enriched)
+            # Load Groq settings once before parallel enrichment
+            groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
+            groq_key_setting = await self._get_setting("groq_api_key", settings.groq_api_key)
+            groq_model_setting = await self._get_setting("groq_model", settings.groq_model)
+
+            groq_extractor = None
+            use_regex = False
+            if groq_enabled_setting.lower() == "true" and groq_key_setting:
+                groq_extractor = GroqContactExtractor(api_key=groq_key_setting, model=groq_model_setting)
+            else:
+                use_regex = True
+
+            enriched = await asyncio.gather(*(self._enrich_item(item, groq_extractor=groq_extractor, use_regex=use_regex) for item in all_items))
+            history.detail_success_count = sum(ok for _, ok, _, _ in enriched)
             history.detail_failure_count = len(enriched) - history.detail_success_count
 
             baseline = not profile.is_baseline_completed
@@ -214,9 +247,11 @@ class MonitoringService:
             persistence_acquired = True
             async with AsyncSessionLocal() as session:
                 repo = MerchantRepository(session)
-                for item, _, checked_at in enriched:
+                for item, _, checked_at, contacts in enriched:
                     unique_users.add(item.advertiser.userNo)
-                    merchant, _, contacts, _, ad = await repo.process_binance_item(item, checked_at)
+                    merchant, _, contacts, _, ad = await repo.process_binance_item(
+                        item, checked_at, extracted_contacts=contacts
+                    )
                     new_profile_merchant, _ = await repo.observe_for_profile(
                         profile.id, merchant.id, ad.id, started
                     )

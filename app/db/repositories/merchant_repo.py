@@ -62,25 +62,33 @@ class MerchantRepository:
         return res.scalar_one_or_none()
 
     async def process_binance_item(
-        self, item: BinanceSearchItem,
-        detail_checked_at: datetime | None = None,
+        self,
+        item: BinanceSearchItem,
+        checked_at: Optional[datetime] = None,
+        extracted_contacts: Optional[List[ExtractedContact]] = None,
     ) -> Tuple[Merchant, bool, List[Contact], bool, Advertisement]:
-        adv_data = item.adv
+        """
+        Process a single BinanceSearchItem:
+        1. Upsert Merchant
+        2. Extract & Upsert Contacts
+        3. Upsert Advertisement
+        """
+        detail_checked_at = checked_at or datetime.now(timezone.utc)
+        now = detail_checked_at
         advertiser_data = item.advertiser
+        adv_data = item.adv
 
-        user_no = advertiser_data.userNo
-        existing_merchant = await self.get_by_user_no(user_no)
-
+        existing_merchant = await self.get_by_user_no(advertiser_data.userNo)
         is_new_merchant = False
         new_contacts: List[Contact] = []
-        now = datetime.now(timezone.utc)
+        is_new_or_updated_ad = False
 
-        if not existing_merchant:
+        if existing_merchant is None:
             is_new_merchant = True
             merchant = Merchant(
-                user_no=user_no,
-                nickname=advertiser_data.nickName,
+                user_no=advertiser_data.userNo,
                 user_type=advertiser_data.userType,
+                nickname=advertiser_data.nickName,
                 month_order_count=advertiser_data.monthOrderCount or 0,
                 month_finish_rate=advertiser_data.monthFinishRate or 0.0,
                 positive_rate=advertiser_data.positiveRate or 0.0,
@@ -112,25 +120,26 @@ class MerchantRepository:
             _normalize_contact_key(c.type, c.value): c for c in all_existing_contacts
         }
 
-        # Extract Contacts: Groq AI if enabled, otherwise regex fallback
-        groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
-        groq_key_setting = await self._get_setting("groq_api_key", settings.groq_api_key)
-        groq_model_setting = await self._get_setting("groq_model", settings.groq_model)
-
+        # Extract Contacts: use pre-computed if available, otherwise fetch
         extracted: List[ExtractedContact] = []
-        if groq_enabled_setting.lower() == "true" and groq_key_setting:
-            groq_extractor = GroqContactExtractor(api_key=groq_key_setting, model=groq_model_setting)
-            extracted = await groq_extractor.extract_from_merchant_data(
-                nickname=merchant.nickname or "",
-                remarks=adv_data.remarks or "",
-                auto_reply=adv_data.autoReplyMsg or "",
-            )
+        if extracted_contacts is not None:
+            extracted = extracted_contacts
         else:
-            extracted = ContactExtractor.extract_from_merchant_data(
-                nickname=merchant.nickname or "",
-                remarks=adv_data.remarks or "",
-                auto_reply=adv_data.autoReplyMsg or "",
-            )
+            groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
+            groq_key_setting = await self._get_setting("groq_api_key", settings.groq_api_key)
+            groq_model_setting = await self._get_setting("groq_model", settings.groq_model)
+
+            if groq_enabled_setting.lower() == "true" and groq_key_setting:
+                groq_extractor = GroqContactExtractor(api_key=groq_key_setting, model=groq_model_setting)
+                extracted = await groq_extractor.extract_from_merchant_data(
+                    remarks=adv_data.remarks or "",
+                    auto_reply=adv_data.autoReplyMsg or "",
+                )
+            else:
+                extracted = ContactExtractor.extract_from_merchant_data(
+                    remarks=adv_data.remarks or "",
+                    auto_reply=adv_data.autoReplyMsg or "",
+                )
 
         for ext in extracted:
             val_clean = ext.value.strip()
