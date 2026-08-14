@@ -11,15 +11,17 @@ from app.services.contact_extractor import ExtractedContact
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert contact information extraction system specialized in Binance P2P trader advertisements.
+DEFAULT_SYSTEM_PROMPT = """You are an expert contact information extraction system specialized in Binance P2P trader advertisements.
 Your goal is to accurately extract ONLY direct communication contacts (Telegram, Phone, WhatsApp, Viber, Instagram, Email) that are explicitly provided by the trader.
 
 CRITICAL EXTRACTION RULES:
 1. ONLY extract contacts explicitly provided in the advertisement terms or auto-reply message.
 2. DO NOT extract or assume usernames from merchant nicknames, terms of trade, bank names, payment methods (e.g. 'SEPA instant', 'Revolut', 'Wise', 'Bizum'), or instructions (e.g. 'Welcome', 'Leave info', 'Only trade').
-3. Standardize Telegram handles with a leading '@' (e.g. '@username').
-4. Normalize Phone, WhatsApp, Viber numbers to international format with leading '+' (e.g. '+380971234567', '+573128318338').
-5. If no explicit communication contacts are provided, return an empty array.
+3. DO NOT return placeholder values (such as 'unknown', 'none', 'n/a', 'null', 'tg', 'tlg', 'whatsapp', 'social') if a username/handle is not explicitly provided.
+4. DO NOT extract service names or abbreviations (e.g. 'Tlg', 'Telegram', 'Whatsapp', 'Viber') as usernames. If a trader only mentions a platform name without giving a handle, IGNORE it.
+5. Standardize Telegram handles with a leading '@' (e.g. '@username').
+6. Normalize Phone, WhatsApp, Viber numbers to international format with leading '+' (e.g. '+380971234567', '+573128318338').
+7. If no explicit communication contacts are provided, return an empty array {"contacts": []}.
 
 Output Schema:
 You MUST respond ONLY with a JSON object:
@@ -30,6 +32,8 @@ You MUST respond ONLY with a JSON object:
 }
 If no contacts are found, return {"contacts": []}.
 """
+
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 # Global circuit breaker state for 70B rate limits
 _70B_RATE_LIMITED_UNTIL: Optional[datetime] = None
@@ -48,14 +52,19 @@ AI_BLACKLIST = {
     "payments", "trusted", "only", "solo", "communication", "every",
     "professional", "please", "ready", "service", "terms", "condition",
     "conditions", "notice", "autopilot", "system", "automated",
+    "unknown", "none", "null", "n/a", "na", "tlg", "whatsup", "whatsapp",
+    "telegram", "viber", "social", "midea", "media", "contact", "contacts",
+    "username", "handle", "profile", "channel", "chat", "group", "link",
+    "dm", "pm", "direct", "number", "phone",
 }
 
 class GroqContactExtractor:
     """Pure AI contact extractor powered by Groq LPUs with zero regex fallback."""
 
-    def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant"):
+    def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant", custom_prompt: str = ""):
         self.api_key = api_key
         self.model = model or "llama-3.1-8b-instant"
+        self.custom_prompt = custom_prompt or ""
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
     @staticmethod
@@ -80,8 +89,9 @@ class GroqContactExtractor:
             return True
         return False
 
-    async def _query_groq_api(self, client: httpx.AsyncClient, effective_key: str, model_name: str, text_content: str) -> Optional[List[ExtractedContact]]:
+    async def _query_groq_api(self, client: httpx.AsyncClient, effective_key: str, model_name: str, text_content: str, system_prompt: str = "") -> Optional[List[ExtractedContact]]:
         global _70B_RATE_LIMITED_UNTIL
+        effective_prompt = system_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
         headers = {
             "Authorization": f"Bearer {effective_key}",
             "Content-Type": "application/json",
@@ -89,7 +99,7 @@ class GroqContactExtractor:
         payload = {
             "model": model_name,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": effective_prompt},
                 {"role": "user", "content": f"Extract explicit communication contacts from this advertisement text:\n\n{text_content}"},
             ],
             "response_format": {"type": "json_object"},
@@ -155,11 +165,13 @@ class GroqContactExtractor:
         auto_reply: str = "",
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        custom_prompt: Optional[str] = None,
     ) -> List[ExtractedContact]:
         """Extract contacts strictly via Groq AI without ANY regex fallback."""
         global _70B_RATE_LIMITED_UNTIL
         effective_key = api_key or self.api_key
         effective_model = model or self.model or "llama-3.1-8b-instant"
+        effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
 
         if not effective_key:
             return []
@@ -184,13 +196,13 @@ class GroqContactExtractor:
         try:
             async with _GROQ_SEMAPHORE:
                 async with httpx.AsyncClient(timeout=3.5) as client:
-                    result = await self._query_groq_api(client, effective_key, target_model, text_content)
+                    result = await self._query_groq_api(client, effective_key, target_model, text_content, system_prompt=effective_prompt)
                     if result is not None:
                         return result
 
                     # Failover to 8B if primary 70B hit rate limit
                     if "8b" not in target_model.lower():
-                        result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content)
+                        result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content, system_prompt=effective_prompt)
                         if result_8b is not None:
                             return result_8b
         except Exception as e:
@@ -199,8 +211,9 @@ class GroqContactExtractor:
         # When Groq AI is enabled, NEVER fallback to regex
         return []
 
-    async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant") -> tuple[bool, str, int]:
+    async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant", custom_prompt: str = "") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
+        effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -208,7 +221,7 @@ class GroqContactExtractor:
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": effective_prompt},
                 {"role": "user", "content": "Extract contacts:\n\nContact me on Telegram @test_trader"},
             ],
             "response_format": {"type": "json_object"},

@@ -228,11 +228,16 @@ class MonitoringService:
             groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
             groq_key_setting = await self._get_setting("groq_api_key", settings.groq_api_key)
             groq_model_setting = await self._get_setting("groq_model", settings.groq_model)
+            groq_prompt_setting = await self._get_setting("groq_custom_prompt", "")
 
             groq_extractor = None
             use_regex = False
             if groq_enabled_setting.lower() == "true" and groq_key_setting:
-                groq_extractor = GroqContactExtractor(api_key=groq_key_setting, model=groq_model_setting)
+                groq_extractor = GroqContactExtractor(
+                    api_key=groq_key_setting,
+                    model=groq_model_setting,
+                    custom_prompt=groq_prompt_setting,
+                )
             else:
                 use_regex = True
 

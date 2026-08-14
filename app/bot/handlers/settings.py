@@ -15,7 +15,7 @@ from app.db.models import SystemSetting
 from app.db.repositories.merchant_repo import MerchantRepository
 from app.db.repositories.profile_repo import ProfileRepository
 from app.services.sheets_service import GoogleSheetsService, DEFAULT_COLUMNS_CONFIG
-from app.services.groq_extractor import GroqContactExtractor
+from app.services.groq_extractor import GroqContactExtractor, DEFAULT_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -33,6 +33,9 @@ class ColumnRenameForm(StatesGroup):
 
 class GroqApiKeyForm(StatesGroup):
     api_key = State()
+
+class GroqPromptForm(StatesGroup):
+    prompt = State()
 
 async def get_setting(key: str, default: str = "") -> str:
     async with AsyncSessionLocal() as session:
@@ -133,9 +136,11 @@ async def cb_groq_settings_menu(call: CallbackQuery):
     groq_enabled = (await get_setting("groq_ai_enabled", "true")).lower() == "true"
     api_key = await get_setting("groq_api_key", settings.groq_api_key)
     model = await get_setting("groq_model", settings.groq_model)
+    custom_prompt = await get_setting("groq_custom_prompt", "")
 
     status_str = "🟢 Включен (Нейросеть Groq LPU)" if groq_enabled else "🔴 Выключен (Резервный Regex)"
     masked_key = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else (api_key or "Не задан")
+    prompt_status = f"✏️ Пользовательский ({len(custom_prompt)} симв.)" if custom_prompt.strip() else "⚙️ По умолчанию"
 
     text = (
         "🤖 <b>НАСТРОЙКИ ИИ ЭКСТРАКТОРА КОНТАКТОВ (GROQ)</b>\n\n"
@@ -143,6 +148,7 @@ async def cb_groq_settings_menu(call: CallbackQuery):
         f"📊 <b>Статус ИИ:</b> {status_str}\n"
         f"🧠 <b>Модель ИИ:</b> <code>{model}</code>\n"
         f"🔑 <b>API Ключ:</b> <code>{masked_key}</code>\n"
+        f"📝 <b>Промпт ИИ:</b> <code>{prompt_status}</code>\n"
     )
 
     btn_toggle = "🤖 ИИ: 🟢 ВКЛ" if groq_enabled else "🤖 ИИ: 🔴 ВЫКЛ (Regex)"
@@ -156,6 +162,9 @@ async def cb_groq_settings_menu(call: CallbackQuery):
         [
             InlineKeyboardButton(text="🔑 Изменить Groq API Key", callback_data="set_groq_api_key"),
             InlineKeyboardButton(text="🧪 Проверить Связь с Groq", callback_data="test_groq_connection"),
+        ],
+        [
+            InlineKeyboardButton(text="📝 Настроить Промпт ИИ", callback_data="menu_groq_prompt"),
         ],
         [
             InlineKeyboardButton(text="⬅️ Назад в Настройки", callback_data="menu_settings"),
@@ -234,6 +243,7 @@ async def process_groq_key_input(message: Message, state: FSMContext):
 async def cb_test_groq_connection(call: CallbackQuery):
     api_key = await get_setting("groq_api_key", settings.groq_api_key)
     model = await get_setting("groq_model", settings.groq_model)
+    custom_prompt = await get_setting("groq_custom_prompt", "")
 
     if not api_key:
         try:
@@ -248,13 +258,102 @@ async def cb_test_groq_connection(call: CallbackQuery):
         pass
 
     extractor = GroqContactExtractor()
-    success, msg, latency = await extractor.test_connection(api_key, model)
+    success, msg, latency = await extractor.test_connection(api_key, model, custom_prompt=custom_prompt)
 
     alert_text = f"{msg}\n⚡ Пинг: {latency} мс\n🧠 Модель: {model}"
     try:
         await call.answer(alert_text, show_alert=True)
     except Exception:
         pass
+
+@router.callback_query(F.data == "menu_groq_prompt")
+async def cb_groq_prompt_menu(call: CallbackQuery):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    custom_prompt = await get_setting("groq_custom_prompt", "")
+    is_custom = bool(custom_prompt.strip())
+    active_prompt_text = custom_prompt if is_custom else DEFAULT_SYSTEM_PROMPT
+
+    prompt_mode = "✏️ Пользовательский" if is_custom else "⚙️ По умолчанию"
+
+    display_prompt = active_prompt_text
+    if len(display_prompt) > 1500:
+        display_prompt = display_prompt[:1500] + "... [сокращено для отображения]"
+
+    text = (
+        "📝 <b>НАСТРОЙКА СИСТЕМНОГО ПРОМПТА ИИ (GROQ)</b>\n\n"
+        f"Режим: <b>{prompt_mode}</b>\n\n"
+        "<b>Текущий системный промпт:</b>\n"
+        f"<pre>{display_prompt}</pre>\n\n"
+        "<i>Вы можете задать свой собственный промпт с любыми правилами извлечения или сбросить его на стандартный.</i>"
+    )
+
+    buttons = [
+        [
+            InlineKeyboardButton(text="✏️ Ввести новый промпт", callback_data="set_groq_prompt"),
+            InlineKeyboardButton(text="🔄 Сбросить на стандартный", callback_data="reset_groq_prompt"),
+        ],
+        [
+            InlineKeyboardButton(text="⬅️ Назад в Groq", callback_data="menu_groq_settings"),
+        ],
+    ]
+
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data == "set_groq_prompt")
+async def cb_set_groq_prompt_start(call: CallbackQuery, state: FSMContext):
+    try:
+        await call.answer()
+    except Exception:
+        pass
+
+    await state.set_state(GroqPromptForm.prompt)
+    text = (
+        "✏️ <b>ВВОД НОВОГО СИСТЕМНОГО ПРОМПТА</b>\n\n"
+        "Отправьте текстовым сообщением новый системный промпт для ИИ.\n\n"
+        "⚠️ <b>Важно:</b> Промпт должен требовать ответ в формате JSON: <code>{\"contacts\": [{\"type\": \"telegram\", \"value\": \"...\"}]}</code>\n\n"
+        "<i>Для отмены нажмите кнопку Назад ниже.</i>"
+    )
+    buttons = [
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="menu_groq_prompt")]
+    ]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.message(GroqPromptForm.prompt)
+async def process_groq_prompt_input(message: Message, state: FSMContext):
+    new_prompt = (message.text or "").strip()
+    await state.clear()
+
+    if len(new_prompt) < 10:
+        await message.answer(
+            "⚠️ Промпт слишком короткий! Изменения не сохранены.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню промпта", callback_data="menu_groq_prompt")]
+            ]),
+            parse_mode="HTML"
+        )
+        return
+
+    await set_setting("groq_custom_prompt", new_prompt)
+    await message.answer(
+        f"✅ <b>Системный промпт ИИ успешно обновлен!</b>\n\nДлина: <code>{len(new_prompt)}</code> символов.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в меню промпта", callback_data="menu_groq_prompt")]
+        ]),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "reset_groq_prompt")
+async def cb_reset_groq_prompt(call: CallbackQuery):
+    await set_setting("groq_custom_prompt", "")
+    try:
+        await call.answer("🔄 Промпт сброшен на стандартный!", show_alert=True)
+    except Exception:
+        pass
+    await cb_groq_prompt_menu(call)
 
 # --- END GROQ AI SETTINGS ---
 
