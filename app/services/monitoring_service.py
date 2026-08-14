@@ -211,8 +211,8 @@ class MonitoringService:
                     rows_per_page=20,
                 )
                 all_items.extend(res.items)
-                total_expected += res.expected_total
-                total_pages += res.pages_fetched
+                total_expected += (res.expected_total or 0)
+                total_pages += (res.pages_fetched or 0)
                 if not res.complete:
                     is_complete = False
                     last_error = res.error
