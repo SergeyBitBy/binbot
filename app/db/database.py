@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -45,13 +46,26 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:
-        # Leases expire on their own; never clear locks belonging to another live process.
+        # Abort unfinished scans from previous process run
         await session.execute(
             update(ScanHistory)
             .where(ScanHistory.status == "RUNNING")
             .values(status="ABORTED", finished_at=func.now(), error_message="Application stopped before scan completion")
         )
-        logger.info("Reset all profile locks to unlocked state.")
+
+        # Stagger active profiles evenly on startup to prevent simultaneous bursts to Binance
+        active_res = await session.execute(
+            select(MonitoringProfile).where(MonitoringProfile.is_active.is_(True)).order_by(MonitoringProfile.id)
+        )
+        active_profiles = active_res.scalars().all()
+        now = datetime.now(timezone.utc)
+        step = 30  # 30 seconds phase offset between profiles
+        for idx, p in enumerate(active_profiles):
+            p.is_locked = False
+            p.locked_until = None
+            p.next_scan_at = now + timedelta(seconds=idx * step)
+
+        logger.info(f"Reset and staggered {len(active_profiles)} active profile scan schedules.")
 
         # 2. Seed Initial Admin if provided
         if settings.initial_admin_username:

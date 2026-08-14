@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     binance_detail_concurrency: int = 5
     binance_detail_refresh_minutes: int = 30
     monitoring_dispatch_interval_seconds: int = 5
-    monitoring_max_concurrency: int = 3
+    monitoring_max_concurrency: int = 1
     monitoring_lease_seconds: int = 300
     notification_max_attempts: int = 10
     notification_worker_interval_seconds: int = 5

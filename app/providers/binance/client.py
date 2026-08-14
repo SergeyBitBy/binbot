@@ -73,9 +73,10 @@ class BinanceClient:
                         raise BinanceAPIError(response.status_code, response.text[:200])
                     await asyncio.sleep(1.0 * attempt)
             except (httpx.TimeoutException, httpx.NetworkError) as e:
-                logger.warning(f"Network error calling Binance API: {e}. Attempt {attempt}/{max_retries}")
+                err_str = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                logger.warning(f"Network error calling Binance API ({err_str}). Attempt {attempt}/{max_retries}")
                 if attempt == max_retries:
-                    raise BinanceNetworkError(f"Network request failed: {e}")
+                    raise BinanceNetworkError(f"Network request failed: {err_str}")
                 await asyncio.sleep(1.5 * attempt)
             except (ValueError, TypeError) as e:
                 logger.warning("Invalid Binance API response. Attempt %s/%s: %s", attempt, max_retries, e)
