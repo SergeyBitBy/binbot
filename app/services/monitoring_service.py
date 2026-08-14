@@ -28,9 +28,11 @@ class MonitoringService:
     def __init__(
         self,
         provider: BinanceP2PProvider | None = None,
+        notification_service: NotificationService | None = None,
         sheets_service: GoogleSheetsService | None = None,
     ):
         self.provider = provider or BinanceP2PProvider()
+        self.notification_service = notification_service
         self.sheets_service = sheets_service or GoogleSheetsService()
         self._dispatch_task: asyncio.Task | None = None
         self._notification_task: asyncio.Task | None = None
@@ -61,6 +63,17 @@ class MonitoringService:
                     pass
         logger.info("MonitoringService stopped background workers")
 
+    async def dispatch_due_profiles(self) -> None:
+        try:
+            if await self._is_global_monitoring_enabled():
+                async with AsyncSessionLocal() as session:
+                    repo = ProfileRepository(session)
+                    due_profiles = await repo.get_due()
+                for profile in due_profiles:
+                    asyncio.create_task(self._run_profile_scan(profile.id, trigger="AUTO"))
+        except Exception as e:
+            logger.exception("Error in dispatch_due_profiles: %s", e)
+
     async def _is_global_monitoring_enabled(self) -> bool:
         async with AsyncSessionLocal() as session:
             res = await session.execute(
@@ -82,12 +95,7 @@ class MonitoringService:
     async def _dispatch_loop(self) -> None:
         while self._running:
             try:
-                if await self._is_global_monitoring_enabled():
-                    async with AsyncSessionLocal() as session:
-                        repo = ProfileRepository(session)
-                        due_profiles = await repo.get_due()
-                    for profile in due_profiles:
-                        asyncio.create_task(self._run_profile_scan(profile.id, trigger="AUTO"))
+                await self.dispatch_due_profiles()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -97,8 +105,8 @@ class MonitoringService:
     async def _notification_worker_loop(self) -> None:
         while self._running:
             try:
-                async with AsyncSessionLocal() as session:
-                    await NotificationService.process_pending(session)
+                if self.notification_service:
+                    await self.notification_service.process_pending()
             except asyncio.CancelledError:
                 break
             except Exception as e:
