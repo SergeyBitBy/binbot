@@ -134,26 +134,31 @@ class NotificationService:
         if not self.bot or await self.is_quiet_hours():
             return
         now = datetime.now(timezone.utc)
+        items_to_send = []
+
+        # 1. Synchronize deliveries for new allowed chats & claim pending items atomically
         async with AsyncSessionLocal() as session:
             chat_ids = list((await session.execute(select(AllowedChat.chat_id))).scalars())
             open_events = list((await session.execute(
                 select(NotificationOutbox.id).where(NotificationOutbox.status.in_(["PENDING", "RETRY"]))
             )).scalars())
-            existing_pairs = set((await session.execute(
-                select(NotificationDelivery.outbox_id, NotificationDelivery.chat_id).where(
-                    NotificationDelivery.outbox_id.in_(open_events or [-1])
-                )
-            )).all())
-            for event_id in open_events:
-                for chat_id in chat_ids:
-                    if (event_id, chat_id) not in existing_pairs:
-                        session.add(NotificationDelivery(
-                            outbox_id=event_id,
-                            chat_id=chat_id,
-                            status="PENDING",
-                            next_attempt_at=now,
-                        ))
-            await session.commit()
+
+            if open_events and chat_ids:
+                existing_pairs = set((await session.execute(
+                    select(NotificationDelivery.outbox_id, NotificationDelivery.chat_id).where(
+                        NotificationDelivery.outbox_id.in_(open_events)
+                    )
+                )).all())
+                for event_id in open_events:
+                    for chat_id in chat_ids:
+                        if (event_id, chat_id) not in existing_pairs:
+                            session.add(NotificationDelivery(
+                                outbox_id=event_id,
+                                chat_id=chat_id,
+                                status="PENDING",
+                                next_attempt_at=now,
+                            ))
+                await session.commit()
 
             deliveries = list((await session.execute(
                 select(NotificationDelivery, NotificationOutbox)
@@ -164,57 +169,92 @@ class NotificationService:
                     NotificationOutbox.status != "DEAD",
                 )
                 .order_by(NotificationDelivery.id)
-                .limit(50)
+                .limit(20)
             )).all())
 
-            for delivery, event in deliveries:
-                try:
-                    await self.bot.send_message(
-                        chat_id=delivery.chat_id,
-                        text=self._format(event.payload, event.event_type),
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
-                    delivery.status = "SENT"
-                    delivery.sent_at = datetime.now(timezone.utc)
-                    await session.commit()
-                except asyncio.CancelledError:
-                    raise
-                except TelegramRetryAfter as exc:
-                    delivery.status = "RETRY"
-                    delivery.attempts += 1
-                    delivery.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=exc.retry_after + 1)
-                    delivery.last_error = str(exc)[:500]
-                    await session.commit()
-                except Exception as exc:
-                    delivery.attempts += 1
-                    delivery.last_error = str(exc)[:500]
-                    if delivery.attempts >= settings.notification_max_attempts:
-                        delivery.status = "DEAD"
-                    else:
-                        delivery.status = "RETRY"
-                        delay = min(3600, 2 ** min(delivery.attempts, 10))
-                        delivery.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-                    await session.commit()
-                    logger.warning("Notification delivery %s failed: %s", delivery.id, exc)
-
-            # Update parent outbox status
-            touched = {event.id for _, event in deliveries}
-            for event_id in touched:
-                event = await session.get(NotificationOutbox, event_id)
-                if not event:
-                    continue
-                states = list((await session.execute(
-                    select(NotificationDelivery.status).where(NotificationDelivery.outbox_id == event_id)
-                )).scalars())
-                if states and all(state == "SENT" for state in states):
-                    event.status = "SENT"
-                    event.sent_at = datetime.now(timezone.utc)
-                elif states and all(state in ("SENT", "DEAD") for state in states):
-                    event.status = "DEAD"
-                else:
-                    event.status = "RETRY"
+            for d, ev in deliveries:
+                d.status = "SENDING"
+                items_to_send.append((d.id, d.chat_id, ev.payload, ev.event_type, ev.id))
             await session.commit()
+
+        if not items_to_send:
+            return
+
+        # 2. Send each message independently and commit its status immediately with retry resilience
+        touched_events = set()
+        for delivery_id, chat_id, payload, event_type, outbox_id in items_to_send:
+            touched_events.add(outbox_id)
+            send_ok = False
+            retry_delay = 30
+            err_msg = None
+
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=self._format(payload, event_type),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                send_ok = True
+                logger.info(f"Notification delivered to chat_id={chat_id} (outbox_id={outbox_id})")
+            except asyncio.CancelledError:
+                raise
+            except TelegramRetryAfter as exc:
+                err_msg = str(exc)[:500]
+                retry_delay = exc.retry_after + 1
+                logger.warning(f"Telegram rate limited chat_id={chat_id}: retry in {retry_delay}s")
+            except Exception as exc:
+                err_msg = str(exc)[:500]
+                logger.warning(f"Telegram send failed for chat_id={chat_id}: {exc}")
+
+            # Commit delivery result with retry against database locks
+            for attempt in range(5):
+                try:
+                    async with AsyncSessionLocal() as session:
+                        d = await session.get(NotificationDelivery, delivery_id)
+                        if d:
+                            if send_ok:
+                                d.status = "SENT"
+                                d.sent_at = datetime.now(timezone.utc)
+                                d.last_error = None
+                            else:
+                                d.attempts += 1
+                                d.last_error = err_msg
+                                if d.attempts >= settings.notification_max_attempts:
+                                    d.status = "DEAD"
+                                else:
+                                    d.status = "RETRY"
+                                    delay = max(retry_delay, min(3600, 2 ** min(d.attempts, 10)))
+                                    d.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                            await session.commit()
+                        break
+                except Exception as e:
+                    logger.debug(f"Retry saving delivery status {delivery_id}: {e}")
+                    await asyncio.sleep(0.3 * (attempt + 1))
+
+        # 3. Update parent outbox status
+        for event_id in touched_events:
+            for attempt in range(5):
+                try:
+                    async with AsyncSessionLocal() as session:
+                        event = await session.get(NotificationOutbox, event_id)
+                        if not event:
+                            break
+                        states = list((await session.execute(
+                            select(NotificationDelivery.status).where(NotificationDelivery.outbox_id == event_id)
+                        )).scalars())
+                        if states and all(state == "SENT" for state in states):
+                            event.status = "SENT"
+                            event.sent_at = datetime.now(timezone.utc)
+                        elif states and all(state in ("SENT", "DEAD") for state in states):
+                            event.status = "DEAD"
+                        elif "SENDING" not in states:
+                            event.status = "RETRY"
+                        await session.commit()
+                        break
+                except Exception as e:
+                    logger.debug(f"Retry updating outbox status {event_id}: {e}")
+                    await asyncio.sleep(0.3 * (attempt + 1))
 
     async def run_worker(self) -> None:
         self._stop.clear()
