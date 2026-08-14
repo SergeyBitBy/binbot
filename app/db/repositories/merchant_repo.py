@@ -61,7 +61,6 @@ class MerchantRepository:
         is_new_merchant = False
         new_contacts: List[Contact] = []
         now = datetime.now(timezone.utc)
-        existing_contacts_map = {}
 
         if not existing_merchant:
             is_new_merchant = True
@@ -91,10 +90,12 @@ class MerchantRepository:
             merchant.auto_reply_msg = adv_data.autoReplyMsg or merchant.auto_reply_msg
             merchant.last_seen_at = now
             merchant.is_active = True
-            
-            existing_contacts_map = {
-                f"{c.type}:{c.value.lower()}": c for c in (merchant.contacts or [])
-            }
+
+        # Fetch all existing contacts from DB to prevent UNIQUE constraint collisions
+        c_stmt = select(Contact).where(Contact.merchant_id == merchant.id)
+        c_res = await self.session.execute(c_stmt)
+        all_existing_contacts = c_res.scalars().all()
+        existing_contacts_map = {f"{c.type.lower()}:{c.value.lower().strip()}": c for c in all_existing_contacts}
 
         # Extract Contacts: Groq AI if enabled, otherwise regex fallback
         groq_enabled_setting = await self._get_setting("groq_ai_enabled", "true")
@@ -117,12 +118,13 @@ class MerchantRepository:
             )
 
         for ext in extracted:
-            key = f"{ext.type}:{ext.value.lower()}"
+            val_clean = ext.value.strip()
+            key = f"{ext.type.lower()}:{val_clean.lower()}"
             if key not in existing_contacts_map:
                 contact = Contact(
                     merchant_id=merchant.id,
                     type=ext.type,
-                    value=ext.value,
+                    value=val_clean,
                     raw_match=ext.raw_match,
                     first_seen_at=now,
                 )
