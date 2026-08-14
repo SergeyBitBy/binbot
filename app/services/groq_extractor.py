@@ -33,6 +33,7 @@ If no contacts are found, return {"contacts": []}.
 
 # Global circuit breaker state for 70B rate limits
 _70B_RATE_LIMITED_UNTIL: Optional[datetime] = None
+_GROQ_SEMAPHORE = asyncio.Semaphore(3)
 
 # Blacklist of common keywords to prevent false positive matches in AI output
 AI_BLACKLIST = {
@@ -181,16 +182,17 @@ class GroqContactExtractor:
             text_content += f"Auto-Reply Message:\n{auto_reply}\n"
 
         try:
-            async with httpx.AsyncClient(timeout=3.5) as client:
-                result = await self._query_groq_api(client, effective_key, target_model, text_content)
-                if result is not None:
-                    return result
+            async with _GROQ_SEMAPHORE:
+                async with httpx.AsyncClient(timeout=3.5) as client:
+                    result = await self._query_groq_api(client, effective_key, target_model, text_content)
+                    if result is not None:
+                        return result
 
-                # Failover to 8B if primary 70B hit rate limit
-                if "8b" not in target_model.lower():
-                    result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content)
-                    if result_8b is not None:
-                        return result_8b
+                    # Failover to 8B if primary 70B hit rate limit
+                    if "8b" not in target_model.lower():
+                        result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content)
+                        if result_8b is not None:
+                            return result_8b
         except Exception as e:
             logger.warning(f"Groq AI request failed: {e}")
 
