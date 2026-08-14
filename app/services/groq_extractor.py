@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import httpx
 
-from app.services.contact_extractor import ExtractedContact, ContactExtractor
+from app.services.contact_extractor import ExtractedContact
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,27 @@ If no contacts are found, return {"contacts": []}.
 # Global circuit breaker state for 70B rate limits
 _70B_RATE_LIMITED_UNTIL: Optional[datetime] = None
 
+# Blacklist of common keywords to prevent false positive matches in AI output
+AI_BLACKLIST = {
+    "binance", "support", "admin", "p2p", "help", "bot", "online", "fast",
+    "trade", "usdt", "uah", "rub", "usd", "eur", "mono", "privat", "pumb",
+    "bank", "card", "pay", "order", "buyer", "seller", "crypto", "change",
+    "privatbank", "monobank", "a-bank", "abank", "vlasnyirakhunok",
+    "instant", "sepa", "revolut", "wise", "garant", "escrow", "ant", "ant.",
+    "instructions", "instrucciones", "welcome", "leave", "thank",
+    "thanks", "merch", "merchant", "trading", "exchange", "account",
+    "partner", "compro", "vendo", "transfer", "transfers", "payment",
+    "payments", "trusted", "only", "solo", "communication", "every",
+    "professional", "please", "ready", "service", "terms", "condition",
+    "conditions", "notice", "autopilot", "system", "automated",
+}
+
 class GroqContactExtractor:
-    """Ultra-fast, multilingual AI contact extractor powered by Groq LPUs with smart circuit breaker, pre-filtering and failover."""
+    """Pure AI contact extractor powered by Groq LPUs with zero regex fallback."""
 
     def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant"):
         self.api_key = api_key
-        self.model = model
+        self.model = model or "llama-3.1-8b-instant"
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
     @staticmethod
@@ -100,7 +115,7 @@ class GroqContactExtractor:
 
                 if c_type == "telegram":
                     c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
-                    if len(c_val) < 3 or c_val.lower() in ContactExtractor.TG_BLACKLIST:
+                    if len(c_val) < 3 or c_val.lower() in AI_BLACKLIST:
                         continue
                     if "t.me" not in c_val:
                         c_val = f"@{c_val}"
@@ -111,7 +126,7 @@ class GroqContactExtractor:
                     c_val = f"+{digits}"
                 elif c_type == "instagram":
                     c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
-                    if len(c_val) < 3 or c_val.lower() in ContactExtractor.TG_BLACKLIST:
+                    if len(c_val) < 3 or c_val.lower() in AI_BLACKLIST:
                         continue
                 elif c_type == "email":
                     c_val = c_val.lower().strip()
@@ -140,18 +155,18 @@ class GroqContactExtractor:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
     ) -> List[ExtractedContact]:
-        """Extract contacts strictly from advertisement text & auto-reply."""
+        """Extract contacts strictly via Groq AI without ANY regex fallback."""
         global _70B_RATE_LIMITED_UNTIL
         effective_key = api_key or self.api_key
         effective_model = model or self.model or "llama-3.1-8b-instant"
+
+        if not effective_key:
+            return []
 
         # 1. Fast heuristic pre-filtering on advertisement text & auto reply only
         combined_text = f"{remarks} {auto_reply}".strip()
         if not self.has_potential_contacts(combined_text):
             return []
-
-        if not effective_key:
-            return ContactExtractor.extract_from_merchant_data(remarks=remarks, auto_reply=auto_reply)
 
         # 2. Check 70B circuit breaker
         target_model = effective_model
@@ -166,21 +181,21 @@ class GroqContactExtractor:
             text_content += f"Auto-Reply Message:\n{auto_reply}\n"
 
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
+            async with httpx.AsyncClient(timeout=3.5) as client:
                 result = await self._query_groq_api(client, effective_key, target_model, text_content)
                 if result is not None:
                     return result
 
-                # Failover to 8B if primary 70B failed
+                # Failover to 8B if primary 70B hit rate limit
                 if "8b" not in target_model.lower():
                     result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content)
                     if result_8b is not None:
                         return result_8b
         except Exception as e:
-            logger.warning(f"Groq AI request failed ({e}), falling back to regex extractor.")
+            logger.warning(f"Groq AI request failed: {e}")
 
-        # 3. Final Fallback to local regex extractor
-        return ContactExtractor.extract_from_merchant_data(remarks=remarks, auto_reply=auto_reply)
+        # When Groq AI is enabled, NEVER fallback to regex
+        return []
 
     async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
