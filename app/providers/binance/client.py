@@ -28,8 +28,29 @@ class BinanceClient:
     def __init__(self, timeout: float = None):
         self.url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         self.detail_url = "https://p2p.binance.com/bapi/c2c/v2/public/c2c/adv/detail-with-advertiser"
-        self.timeout = timeout or settings.binance_request_timeout
-        self.client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True)
+        self.timeout_val = timeout or settings.binance_request_timeout
+        self.timeout = httpx.Timeout(connect=10.0, read=self.timeout_val, write=10.0, pool=30.0)
+        self.limits = httpx.Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=10.0)
+        self._client_lock = asyncio.Lock()
+        self.client = self._create_client()
+
+    def _create_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self.timeout,
+            limits=self.limits,
+            follow_redirects=True,
+        )
+
+    async def _recreate_client(self):
+        """Safely recreate HTTP client and connection pool on PoolTimeout or broken connections."""
+        async with self._client_lock:
+            try:
+                old_client = self.client
+                self.client = self._create_client()
+                await old_client.aclose()
+                logger.info("Binance HTTP client connection pool was refreshed successfully.")
+            except Exception as e:
+                logger.debug("Error refreshing httpx client: %s", e)
 
     @staticmethod
     def _get_headers() -> Dict[str, str]:
@@ -75,6 +96,8 @@ class BinanceClient:
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 err_str = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                 logger.warning(f"Network error calling Binance API ({err_str}). Attempt {attempt}/{max_retries}")
+                if isinstance(e, httpx.PoolTimeout) or attempt == max_retries:
+                    await self._recreate_client()
                 if attempt == max_retries:
                     raise BinanceNetworkError(f"Network request failed: {err_str}")
                 await asyncio.sleep(1.5 * attempt)
@@ -113,6 +136,8 @@ class BinanceClient:
                 raise
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, httpx.PoolTimeout) or attempt == max_retries:
+                    await self._recreate_client()
                 if attempt < max_retries:
                     await asyncio.sleep(attempt * 1.5 + random.uniform(0, 0.5))
                 else:
@@ -123,4 +148,5 @@ class BinanceClient:
         return DetailFetchResult(success=False, error="maximum retries exceeded")
 
     async def close(self):
-        await self.client.aclose()
+        async with self._client_lock:
+            await self.client.aclose()
