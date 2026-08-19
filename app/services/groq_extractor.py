@@ -112,47 +112,52 @@ class GroqContactExtractor:
             "temperature": 0.0,
         }
 
-        t0 = time.perf_counter()
-        resp = await client.post(self.endpoint, headers=headers, json=payload)
-        duration_ms = round((time.perf_counter() - t0) * 1000)
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            t0 = time.perf_counter()
+            resp = await client.post(self.endpoint, headers=headers, json=payload)
+            duration_ms = round((time.perf_counter() - t0) * 1000)
 
-        if resp.status_code == 200:
-            data = resp.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-            parsed = json.loads(content)
-            raw_contacts = parsed.get("contacts", [])
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                parsed = json.loads(content)
+                raw_contacts = parsed.get("contacts", [])
 
-            contacts: List[ExtractedContact] = []
-            for item in raw_contacts:
-                c_type = str(item.get("type", "")).strip().lower()
-                c_val = str(item.get("value", "")).strip()
+                contacts: List[ExtractedContact] = []
+                for item in raw_contacts:
+                    c_type = str(item.get("type", "")).strip().lower()
+                    c_val = str(item.get("value", "")).strip()
 
-                if not c_type or not c_val:
-                    continue
-
-                if c_type == "telegram":
-                    if not c_val.startswith("@") and "t.me" not in c_val:
-                        c_val = f"@{c_val}"
-                    clean_name = c_val.lstrip("@").lower()
-                    if clean_name in AI_BLACKLIST or len(clean_name) < 4:
+                    if not c_type or not c_val:
                         continue
-                elif c_type in ("phone", "whatsapp", "viber"):
-                    digits = re.sub(r"\D", "", c_val)
-                    if len(digits) < 8 or len(digits) > 16:
-                        continue
-                    if not c_val.startswith("+"):
-                        c_val = f"+{digits}"
 
-                contacts.append(ExtractedContact(type=c_type, value=c_val, raw_source="groq_ai"))
+                    if c_type == "telegram":
+                        if not c_val.startswith("@") and "t.me" not in c_val:
+                            c_val = f"@{c_val}"
+                        clean_name = c_val.lstrip("@").lower()
+                        if clean_name in AI_BLACKLIST or len(clean_name) < 4:
+                            continue
+                    elif c_type in ("phone", "whatsapp", "viber"):
+                        digits = re.sub(r"\D", "", c_val)
+                        if len(digits) < 8 or len(digits) > 16:
+                            continue
+                        if not c_val.startswith("+"):
+                            c_val = f"+{digits}"
 
-            logger.debug(f"Groq AI ({model_name}) extracted {len(contacts)} contacts in {duration_ms}ms.")
-            return contacts
-        elif resp.status_code == 429:
-            logger.warning(f"Groq rate limit hit (429) on {model_name}.")
-            return None
-        else:
-            logger.warning(f"Groq API error ({resp.status_code}) on {model_name}: {resp.text[:150]}")
-            return None
+                    contacts.append(ExtractedContact(type=c_type, value=c_val, raw_source="groq_ai"))
+
+                logger.debug(f"Groq AI ({model_name}) extracted {len(contacts)} contacts in {duration_ms}ms.")
+                return contacts
+            elif resp.status_code == 429:
+                retry_after = float(resp.headers.get("retry-after", attempt * 1.5))
+                logger.warning(f"Groq rate limit hit (429) on {model_name}. Attempt {attempt}/{max_retries}, retrying in {retry_after}s.")
+                if attempt == max_retries:
+                    return None
+                await asyncio.sleep(retry_after + random.uniform(0.1, 0.4))
+            else:
+                logger.warning(f"Groq API error ({resp.status_code}) on {model_name}: {resp.text[:150]}")
+                return None
 
     async def extract_from_merchant_data(
         self,
