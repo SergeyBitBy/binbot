@@ -143,7 +143,7 @@ class GroqContactExtractor:
                     if not c_val.startswith("+"):
                         c_val = f"+{digits}"
 
-                contacts.append(ExtractedContact(type=c_type, value=c_val))
+                contacts.append(ExtractedContact(type=c_type, value=c_val, raw_source="groq_ai"))
 
             logger.debug(f"Groq AI ({model_name}) extracted {len(contacts)} contacts in {duration_ms}ms.")
             return contacts
