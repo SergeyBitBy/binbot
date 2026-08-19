@@ -152,7 +152,7 @@ async def cb_groq_settings_menu(call: CallbackQuery):
     )
 
     btn_toggle = "🤖 ИИ: 🟢 ВКЛ" if groq_enabled else "🤖 ИИ: 🔴 ВЫКЛ (Regex)"
-    btn_model_switch = "🧠 Модель: 70B Versatile" if "70b" in model.lower() else "🧠 Модель: 8B Instant"
+    btn_model_switch = "🧠 Модель: Qwen 27B" if "qwen" in model.lower() else "🧠 Модель: GPT-OSS 20B"
 
     buttons = [
         [
@@ -190,7 +190,7 @@ async def cb_toggle_groq(call: CallbackQuery):
 @router.callback_query(F.data == "toggle_groq_model")
 async def cb_toggle_groq_model(call: CallbackQuery):
     current = await get_setting("groq_model", settings.groq_model)
-    new_model = "llama-3.1-8b-instant" if "70b" in current.lower() else "llama-3.3-70b-versatile"
+    new_model = "openai/gpt-oss-20b" if "qwen" in current.lower() else "qwen/qwen3.6-27b"
     await set_setting("groq_model", new_model)
 
     try:

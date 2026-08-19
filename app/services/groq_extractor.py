@@ -61,9 +61,9 @@ AI_BLACKLIST = {
 class GroqContactExtractor:
     """Pure AI contact extractor powered by Groq LPUs with zero regex fallback."""
 
-    def __init__(self, api_key: str = "", model: str = "llama-3.1-8b-instant", custom_prompt: str = ""):
+    def __init__(self, api_key: str = "", model: str = "openai/gpt-oss-20b", custom_prompt: str = ""):
         self.api_key = api_key
-        self.model = model or "llama-3.1-8b-instant"
+        self.model = model or "openai/gpt-oss-20b"
         self.custom_prompt = custom_prompt or ""
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -75,10 +75,17 @@ class GroqContactExtractor:
         lower = text.lower()
         if "@" in lower or "t.me" in lower or "wa.me" in lower or "viber://" in lower or "instagram.com" in lower:
             return True
+        # Check contact-related emojis
+        contact_emojis = ["📲", "📱", "📞", "☎️", "💬", "✉️", "📧", "👉", "👇", "✍️"]
+        for emoji in contact_emojis:
+            if emoji in text:
+                return True
         keywords = [
             "tg", "тг", "телеграм", "telegram", "телеграмм", "viber", "вайбер",
-            "whats", "ватсап", "вацап", "связь", "зв'яз", "звʼяз", "личк", "лс",
-            "pm", "phone", "тел", "contact", "контакт"
+            "whats", "whatsapp", "ватсап", "вацап", "связь", "зв'яз", "звʼяз", "личк", "лс",
+            "pm", "dm", "phone", "тел", "contact", "контакт", "contacts", "write",
+            "пишите", "напишите", "escribe", "escribir", "contactar", "teléfono",
+            "telefono", "wpp", "social", "comunicar", "mensaje", "inbox"
         ]
         # Match whole words only
         for k in keywords:
@@ -90,7 +97,6 @@ class GroqContactExtractor:
         return False
 
     async def _query_groq_api(self, client: httpx.AsyncClient, effective_key: str, model_name: str, text_content: str, system_prompt: str = "") -> Optional[List[ExtractedContact]]:
-        global _70B_RATE_LIMITED_UNTIL
         effective_prompt = system_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
         headers = {
             "Authorization": f"Bearer {effective_key}",
@@ -112,47 +118,37 @@ class GroqContactExtractor:
 
         if resp.status_code == 200:
             data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
             parsed = json.loads(content)
             raw_contacts = parsed.get("contacts", [])
 
-            contacts = []
-            seen = set()
+            contacts: List[ExtractedContact] = []
             for item in raw_contacts:
-                c_type = str(item.get("type", "telegram")).lower().strip()
-                c_val = str(item.get("value", "")).strip(".,;:!? '\"()[]{}<>")
-                if not c_val:
+                c_type = str(item.get("type", "")).strip().lower()
+                c_val = str(item.get("value", "")).strip()
+
+                if not c_type or not c_val:
                     continue
 
                 if c_type == "telegram":
-                    c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
-                    if len(c_val) < 3 or c_val.lower() in AI_BLACKLIST:
-                        continue
-                    if "t.me" not in c_val:
+                    if not c_val.startswith("@") and "t.me" not in c_val:
                         c_val = f"@{c_val}"
+                    clean_name = c_val.lstrip("@").lower()
+                    if clean_name in AI_BLACKLIST or len(clean_name) < 4:
+                        continue
                 elif c_type in ("phone", "whatsapp", "viber"):
                     digits = re.sub(r"\D", "", c_val)
                     if len(digits) < 8 or len(digits) > 16:
                         continue
-                    c_val = f"+{digits}"
-                elif c_type == "instagram":
-                    c_val = c_val.lstrip("@").strip(".,;:!? '\"()[]{}<>")
-                    if len(c_val) < 3 or c_val.lower() in AI_BLACKLIST:
-                        continue
-                elif c_type == "email":
-                    c_val = c_val.lower().strip()
+                    if not c_val.startswith("+"):
+                        c_val = f"+{digits}"
 
-                key = (c_type, c_val.lower())
-                if key not in seen:
-                    seen.add(key)
-                    contacts.append(ExtractedContact(type=c_type, value=c_val, raw_source="groq_ai"))
+                contacts.append(ExtractedContact(type=c_type, value=c_val))
 
             logger.debug(f"Groq AI ({model_name}) extracted {len(contacts)} contacts in {duration_ms}ms.")
             return contacts
         elif resp.status_code == 429:
-            if "70b" in model_name.lower():
-                _70B_RATE_LIMITED_UNTIL = datetime.now(timezone.utc) + timedelta(minutes=30)
-                logger.warning(f"Groq 70B rate limit hit (429). Circuit breaker active for 30 minutes.")
+            logger.warning(f"Groq rate limit hit (429) on {model_name}.")
             return None
         else:
             logger.warning(f"Groq API error ({resp.status_code}) on {model_name}: {resp.text[:150]}")
@@ -168,9 +164,8 @@ class GroqContactExtractor:
         custom_prompt: Optional[str] = None,
     ) -> List[ExtractedContact]:
         """Extract contacts strictly via Groq AI without ANY regex fallback."""
-        global _70B_RATE_LIMITED_UNTIL
         effective_key = api_key or self.api_key
-        effective_model = model or self.model or "llama-3.1-8b-instant"
+        effective_model = model or self.model or "openai/gpt-oss-20b"
         effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
 
         if not effective_key:
@@ -181,11 +176,7 @@ class GroqContactExtractor:
         if not self.has_potential_contacts(combined_text):
             return []
 
-        # 2. Check 70B circuit breaker
         target_model = effective_model
-        now = datetime.now(timezone.utc)
-        if "70b" in target_model.lower() and _70B_RATE_LIMITED_UNTIL and now < _70B_RATE_LIMITED_UNTIL:
-            target_model = "llama-3.1-8b-instant"
 
         text_content = ""
         if remarks:
@@ -195,23 +186,23 @@ class GroqContactExtractor:
 
         try:
             async with _GROQ_SEMAPHORE:
-                async with httpx.AsyncClient(timeout=3.5) as client:
+                async with httpx.AsyncClient(timeout=4.0) as client:
                     result = await self._query_groq_api(client, effective_key, target_model, text_content, system_prompt=effective_prompt)
                     if result is not None:
                         return result
 
-                    # Failover to 8B if primary 70B hit rate limit
-                    if "8b" not in target_model.lower():
-                        result_8b = await self._query_groq_api(client, effective_key, "llama-3.1-8b-instant", text_content, system_prompt=effective_prompt)
-                        if result_8b is not None:
-                            return result_8b
+                    # Failover to secondary model if primary returned error or rate limit
+                    failover_model = "qwen/qwen3.6-27b" if "gpt-oss" in target_model.lower() else "openai/gpt-oss-20b"
+                    result_fallback = await self._query_groq_api(client, effective_key, failover_model, text_content, system_prompt=effective_prompt)
+                    if result_fallback is not None:
+                        return result_fallback
         except Exception as e:
             logger.warning(f"Groq AI request failed: {e}")
 
         # When Groq AI is enabled, NEVER fallback to regex
         return []
 
-    async def test_connection(self, api_key: str, model: str = "llama-3.1-8b-instant", custom_prompt: str = "") -> tuple[bool, str, int]:
+    async def test_connection(self, api_key: str, model: str = "openai/gpt-oss-20b", custom_prompt: str = "") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
         effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
         headers = {
