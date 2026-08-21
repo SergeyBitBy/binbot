@@ -1,6 +1,8 @@
 import asyncio
+import hashlib
 import json
 import logging
+import random
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -10,6 +12,9 @@ import httpx
 from app.services.contact_extractor import ExtractedContact
 
 logger = logging.getLogger(__name__)
+
+# Global extraction cache to prevent redundant Groq API calls for unchanged ads
+_EXTRACTION_CACHE: dict[str, List[ExtractedContact]] = {}
 
 DEFAULT_SYSTEM_PROMPT = """You are an expert contact information extraction system specialized in Binance P2P trader advertisements.
 Your goal is to accurately extract ONLY direct communication contacts (Telegram, Phone, WhatsApp, Viber, Instagram, Email) that are explicitly provided by the trader.
@@ -35,9 +40,8 @@ If no contacts are found, return {"contacts": []}.
 
 SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
-# Global circuit breaker state for 70B rate limits
-_70B_RATE_LIMITED_UNTIL: Optional[datetime] = None
-_GROQ_SEMAPHORE = asyncio.Semaphore(3)
+# Global circuit breaker state and concurrency control
+_GROQ_SEMAPHORE = asyncio.Semaphore(2)
 
 # Blacklist of common keywords to prevent false positive matches in AI output
 AI_BLACKLIST = {
@@ -183,6 +187,11 @@ class GroqContactExtractor:
 
         target_model = effective_model
 
+        # Check cache by hashing model, prompt, and input text
+        cache_key = hashlib.md5(f"{target_model}:{effective_prompt}:{combined_text}".encode("utf-8")).hexdigest()
+        if cache_key in _EXTRACTION_CACHE:
+            return _EXTRACTION_CACHE[cache_key]
+
         text_content = ""
         if remarks:
             text_content += f"Terms / Remarks:\n{remarks}\n"
@@ -194,6 +203,9 @@ class GroqContactExtractor:
                 async with httpx.AsyncClient(timeout=4.0) as client:
                     result = await self._query_groq_api(client, effective_key, target_model, text_content, system_prompt=effective_prompt)
                     if result is not None:
+                        if len(_EXTRACTION_CACHE) > 5000:
+                            _EXTRACTION_CACHE.clear()
+                        _EXTRACTION_CACHE[cache_key] = result
                         return result
 
                     # Failover to secondary models if primary returned error or rate limit
@@ -202,6 +214,9 @@ class GroqContactExtractor:
                         if f_model != target_model:
                             result_fallback = await self._query_groq_api(client, effective_key, f_model, text_content, system_prompt=effective_prompt)
                             if result_fallback is not None:
+                                if len(_EXTRACTION_CACHE) > 5000:
+                                    _EXTRACTION_CACHE.clear()
+                                _EXTRACTION_CACHE[cache_key] = result_fallback
                                 return result_fallback
         except Exception as e:
             logger.warning(f"Groq AI request failed: {e}")
