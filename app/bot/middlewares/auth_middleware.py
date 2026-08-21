@@ -11,9 +11,54 @@ from app.db.repositories.audit_repo import AuditRepository
 
 logger = logging.getLogger(__name__)
 
-# In-memory authorization cache with 60s TTL
+# In-memory authorization cache with 120s TTL and fallback on DB locks
 _AUTH_USER_CACHE: Dict[int, Tuple[bool, Optional[str], float]] = {}
 _AUTH_CHAT_CACHE: Dict[int, Tuple[bool, float]] = {}
+
+
+async def get_user_auth(user_id: Optional[int], username: Optional[str]) -> Tuple[bool, Optional[str]]:
+    if not user_id:
+        return False, None
+    now = time.monotonic()
+    if user_id in _AUTH_USER_CACHE:
+        is_ok, role, exp = _AUTH_USER_CACHE[user_id]
+        if now < exp:
+            return is_ok, role
+
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = AuditRepository(session)
+            is_ok = await repo.is_authorized_user(user_id, username)
+            role = await repo.get_user_role(user_id) if is_ok else None
+            _AUTH_USER_CACHE[user_id] = (is_ok, role, now + 120.0)
+            return is_ok, role
+    except Exception as e:
+        logger.error("Error checking user authorization: %s", e)
+        if user_id in _AUTH_USER_CACHE:
+            return _AUTH_USER_CACHE[user_id][0], _AUTH_USER_CACHE[user_id][1]
+        return False, None
+
+
+async def get_chat_auth(chat_id: Optional[int]) -> bool:
+    if not chat_id:
+        return False
+    now = time.monotonic()
+    if chat_id in _AUTH_CHAT_CACHE:
+        is_ok, exp = _AUTH_CHAT_CACHE[chat_id]
+        if now < exp:
+            return is_ok
+
+    try:
+        async with AsyncSessionLocal() as session:
+            repo = AuditRepository(session)
+            is_ok = await repo.is_allowed_chat(chat_id)
+            _AUTH_CHAT_CACHE[chat_id] = (is_ok, now + 120.0)
+            return is_ok
+    except Exception as e:
+        logger.error("Error checking chat authorization: %s", e)
+        if chat_id in _AUTH_CHAT_CACHE:
+            return _AUTH_CHAT_CACHE[chat_id][0]
+        return False
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -43,39 +88,8 @@ class AuthMiddleware(BaseMiddleware):
 
             logger.info("Incoming event user_id=%s chat_id=%s type=%s", user_id, chat_id, type(event).__name__)
 
-            now_mono = time.monotonic()
-            is_user_ok = False
-            role = None
-            is_chat_ok = False
-
-            # Check user cache
-            if user_id and user_id in _AUTH_USER_CACHE:
-                cached_ok, cached_role, exp = _AUTH_USER_CACHE[user_id]
-                if now_mono < exp:
-                    is_user_ok = cached_ok
-                    role = cached_role
-
-            # Check chat cache
-            if chat_id and chat_id in _AUTH_CHAT_CACHE:
-                cached_chat_ok, exp = _AUTH_CHAT_CACHE[chat_id]
-                if now_mono < exp:
-                    is_chat_ok = cached_chat_ok
-
-            # If cache miss, query DB
-            if (user_id and user_id not in _AUTH_USER_CACHE) or (chat_id and chat_id not in _AUTH_CHAT_CACHE):
-                try:
-                    async with AsyncSessionLocal() as session:
-                        repo = AuditRepository(session)
-                        if user_id and (user_id not in _AUTH_USER_CACHE or now_mono >= _AUTH_USER_CACHE[user_id][2]):
-                            is_user_ok = await repo.is_authorized_user(user_id, username)
-                            role = await repo.get_user_role(user_id)
-                            _AUTH_USER_CACHE[user_id] = (is_user_ok, role, now_mono + 60.0)
-
-                        if chat_id and (chat_id not in _AUTH_CHAT_CACHE or now_mono >= _AUTH_CHAT_CACHE[chat_id][1]):
-                            is_chat_ok = await repo.is_allowed_chat(chat_id)
-                            _AUTH_CHAT_CACHE[chat_id] = (is_chat_ok, now_mono + 60.0)
-                except Exception as dbe:
-                    logger.error(f"Error checking authorization in DB: {dbe}")
+            is_user_ok, role = await get_user_auth(user_id, username)
+            is_chat_ok = await get_chat_auth(chat_id)
 
             is_private = isinstance(event, Message) and event.chat.type == "private"
             if isinstance(event, CallbackQuery) and event.message:
