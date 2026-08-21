@@ -61,9 +61,9 @@ AI_BLACKLIST = {
 class GroqContactExtractor:
     """Pure AI contact extractor powered by Groq LPUs with zero regex fallback."""
 
-    def __init__(self, api_key: str = "", model: str = "openai/gpt-oss-20b", custom_prompt: str = ""):
+    def __init__(self, api_key: str = "", model: str = "qwen/qwen3.6-27b", custom_prompt: str = ""):
         self.api_key = api_key
-        self.model = model or "openai/gpt-oss-20b"
+        self.model = model or "qwen/qwen3.6-27b"
         self.custom_prompt = custom_prompt or ""
         self.endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -170,7 +170,7 @@ class GroqContactExtractor:
     ) -> List[ExtractedContact]:
         """Extract contacts strictly via Groq AI without ANY regex fallback."""
         effective_key = api_key or self.api_key
-        effective_model = model or self.model or "openai/gpt-oss-20b"
+        effective_model = model or self.model or "qwen/qwen3.6-27b"
         effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
 
         if not effective_key:
@@ -196,18 +196,20 @@ class GroqContactExtractor:
                     if result is not None:
                         return result
 
-                    # Failover to secondary model if primary returned error or rate limit
-                    failover_model = "qwen/qwen3.6-27b" if "gpt-oss" in target_model.lower() else "openai/gpt-oss-20b"
-                    result_fallback = await self._query_groq_api(client, effective_key, failover_model, text_content, system_prompt=effective_prompt)
-                    if result_fallback is not None:
-                        return result_fallback
+                    # Failover to secondary models if primary returned error or rate limit
+                    failovers = ["groq/compound-mini", "openai/gpt-oss-120b"]
+                    for f_model in failovers:
+                        if f_model != target_model:
+                            result_fallback = await self._query_groq_api(client, effective_key, f_model, text_content, system_prompt=effective_prompt)
+                            if result_fallback is not None:
+                                return result_fallback
         except Exception as e:
             logger.warning(f"Groq AI request failed: {e}")
 
         # When Groq AI is enabled, NEVER fallback to regex
         return []
 
-    async def test_connection(self, api_key: str, model: str = "openai/gpt-oss-20b", custom_prompt: str = "") -> tuple[bool, str, int]:
+    async def test_connection(self, api_key: str, model: str = "qwen/qwen3.6-27b", custom_prompt: str = "") -> tuple[bool, str, int]:
         """Test Groq API key connection and return (success, message, latency_ms)."""
         effective_prompt = custom_prompt or self.custom_prompt or DEFAULT_SYSTEM_PROMPT
         headers = {
