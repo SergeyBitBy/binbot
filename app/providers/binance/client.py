@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 import httpx
@@ -32,6 +33,7 @@ class BinanceClient:
         self.timeout = httpx.Timeout(connect=10.0, read=self.timeout_val, write=10.0, pool=30.0)
         self.limits = httpx.Limits(max_connections=200, max_keepalive_connections=50, keepalive_expiry=10.0)
         self._client_lock = asyncio.Lock()
+        self._last_recreated: float = 0.0
         self.client = self._create_client()
 
     def _create_client(self) -> httpx.AsyncClient:
@@ -42,12 +44,16 @@ class BinanceClient:
         )
 
     async def _recreate_client(self):
-        """Safely recreate HTTP client and connection pool on PoolTimeout or broken connections."""
+        """Safely recreate HTTP client and connection pool on PoolTimeout with rate limiting."""
         async with self._client_lock:
+            now = time.monotonic()
+            if now - self._last_recreated < 60.0:
+                return
+            self._last_recreated = now
             try:
                 old_client = self.client
                 self.client = self._create_client()
-                await old_client.aclose()
+                asyncio.create_task(old_client.aclose())
                 logger.info("Binance HTTP client connection pool was refreshed successfully.")
             except Exception as e:
                 logger.debug("Error refreshing httpx client: %s", e)
@@ -96,7 +102,7 @@ class BinanceClient:
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 err_str = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
                 logger.warning(f"Network error calling Binance API ({err_str}). Attempt {attempt}/{max_retries}")
-                if isinstance(e, httpx.PoolTimeout) or attempt == max_retries:
+                if isinstance(e, httpx.PoolTimeout):
                     await self._recreate_client()
                 if attempt == max_retries:
                     raise BinanceNetworkError(f"Network request failed: {err_str}")
@@ -136,7 +142,7 @@ class BinanceClient:
                 raise
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
-                if isinstance(exc, httpx.PoolTimeout) or attempt == max_retries:
+                if isinstance(exc, httpx.PoolTimeout):
                     await self._recreate_client()
                 if attempt < max_retries:
                     await asyncio.sleep(attempt * 1.5 + random.uniform(0, 0.5))
